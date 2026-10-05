@@ -16,6 +16,8 @@ when a customer replies — agents do not receive email. See [in-app-notificatio
 | Ticket created | Customer | Ticket is submitted |
 | Agent replied | Customer | Agent posts a public reply |
 | Ticket closed | Customer | Ticket status changes to a closed state |
+| Ticket merged | Customer | An agent merges one of their tickets into another (admin can turn off) |
+| Ticket created (split) | Customer | An agent splits one of their replies into a new ticket |
 
 > Customer replies notify agents **in-app only** (not by email). See the dedicated doc.
 
@@ -58,6 +60,29 @@ when a customer replies — agents do not receive email. See [in-app-notificatio
 **Content:**
 - Notification that the ticket has been closed.
 - Option to reopen: link to the ticket with a note that they can reply or click "Reopen" if they need further help.
+
+---
+
+## 4. Ticket Merged
+
+**To:** Customer email (same customer on both tickets — merges are same-customer only)
+**Subject:** `[#1043] Your ticket has been merged into #1042 — {target subject}`
+
+**Content:**
+- Ticket #1043 (and its subject) was about the same request as #1042, so they were combined.
+- All their messages and attachments are now in #1042; they should reply there.
+- A button linking to the ticket it was merged into (`resolveTicketPortalUrl()`, so per-API-key
+  portal URLs apply). Their old #1043 link also forwards there.
+
+Template: `lib/email/templates/ticket-merged.tsx`, editable as **Ticket Merged** under
+`/admin/email-templates` (merge tags: `mergedTicketNumber`, `mergedTicketSubject`,
+`ticketNumber`, `ticketSubject`, `ticketUrl`, `customerName`). Sent from `mergeTickets()`
+(`lib/tickets/merge.ts`) only when **Admin → Ticket Config → Ticket Actions → Merge → Email the
+customer** is on (default on), and — like every ticket email — only while "Docket sends email"
+is on.
+
+A **split** reuses the Ticket Created email for the new ticket (see
+[tickets.md § Split](./tickets.md#split)).
 - Satisfaction feedback (optional — out of scope for MVP).
 
 ---
@@ -189,7 +214,7 @@ If `SMTP_HOST` is not set, the worker logs emails to console instead of sending 
 
 ## Disabling Docket's Ticket Emails
 
-`/admin/email-templates` has a **"Docket sends email"** toggle (`platform_settings.ticket_email_notifications_enabled`, default on). It gates only the four customer-facing ticket lifecycle emails — ticket created, agent replied, ticket closed, status changed (`enqueueEmail({ ..., category: "ticket" })` in the routes/lib listed above) — checked once, up front, in `enqueueEmail()` (`lib/email/index.ts`) so a disabled email never reaches the outbox/queue.
+`/admin/email-templates` has a **"Docket sends email"** toggle (`platform_settings.ticket_email_notifications_enabled`, default on). It gates only the customer-facing ticket lifecycle emails — ticket created (including split), agent replied, ticket closed, status changed, ticket merged (`enqueueEmail({ ..., category: "ticket" })` in the routes/lib listed above) — checked once, up front, in `enqueueEmail()` (`lib/email/index.ts`) so a disabled email never reaches the outbox/queue.
 
 This exists for teams that consume the same events via [outbound webhooks](webhooks.md) and send the equivalent email themselves from their own backend — turning this off avoids the customer getting duplicate notifications. It does **not** affect agent/admin auth emails (magic link, password reset) or user invites — those always send regardless of this flag, since they aren't mirrored by a webhook event and have no external replacement. The my-tickets-list "send me my tickets" email is also unaffected — it's a customer-initiated self-service request, not an event notification.
 

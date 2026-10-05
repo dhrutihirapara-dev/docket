@@ -13,14 +13,22 @@ import {
 } from "@/db/schema";
 import { audit } from "@/lib/audit";
 import { db } from "@/lib/db";
+import { enqueueEmail } from "@/lib/email";
+import { ticketMergedTemplate } from "@/lib/email/templates/ticket-merged";
+import {
+  createNotifications,
+  ticketOwnerRecipients,
+} from "@/lib/notifications";
 import {
   publishTicketCommentCreated,
   publishTicketCreated,
 } from "@/lib/realtime";
 import { textToRichTextJson } from "@/lib/rich-text";
+import { getTicketActionSettings } from "@/lib/settings";
 import { computeSlaTransition } from "@/lib/sla";
 import { getClosedStatus, getTicketStatuses } from "@/lib/ticket-config";
 import { ticketLinkKey } from "@/lib/tickets/links";
+import { resolveTicketPortalUrl } from "@/lib/tickets/portal-url";
 import {
   CONCURRENT_CHANGE_MESSAGE,
   ConcurrentTicketChangeError,
@@ -160,7 +168,10 @@ const mergeColumns = {
   customerId: tickets.customerId,
   customerName: customers.name,
   customerEmail: customers.email,
+  customerToken: tickets.customerToken,
+  apiKeyId: tickets.apiKeyId,
   mergedIntoTicketId: tickets.mergedIntoTicketId,
+  assignedAgentId: tickets.assignedAgentId,
   awaitingReply: tickets.awaitingReply,
   waitingSince: tickets.waitingSince,
   firstRespondedAt: tickets.firstRespondedAt,
@@ -171,7 +182,8 @@ const mergeColumns = {
 /** Merges `sourceId` into the ticket numbered `targetTicketNumber`. The source
  * is kept — closed and pointing at the target — so its portal link and API id
  * keep working; everything customer-visible moves to the target. Same-customer
- * only, target must be open, irreversible. No customer email (silent merge). */
+ * only, target must be open, irreversible. The customer gets the "Ticket
+ * Merged" email unless an admin turned it off (Ticket Config → Ticket Actions). */
 export async function mergeTickets(
   sourceId: string,
   targetTicketNumber: number,
@@ -530,6 +542,66 @@ export async function mergeTickets(
     publishTicketCreated(),
   ]).catch((err) => console.error("[realtime.ticket_merged]", err));
 
+  // Tell both owners: the source's owner sees their ticket vanish from the
+  // list, the target's owner gets new messages in theirs. Both notifications
+  // open the target — the source only redirects there anyway.
+  const actionSettings = await getTicketActionSettings();
+
+  // Tell the customer where the conversation continues. Same-customer only, so
+  // the target's link (and token) is theirs. enqueueEmail drops it when the
+  // admin turned ticket emails off altogether.
+  if (actionSettings.ticketMergeCustomerEmailEnabled) {
+    const ticketUrl = await resolveTicketPortalUrl(
+      target.id,
+      target.customerToken,
+      target.apiKeyId
+    );
+    await ticketMergedTemplate({
+      customerName: target.customerName,
+      mergedTicketNumber: source.ticketNumber,
+      mergedTicketSubject: source.subject,
+      ticketNumber: target.ticketNumber,
+      ticketSubject: target.subject,
+      ticketUrl,
+    })
+      .then(({ subject: emailSubject, html, text }) =>
+        enqueueEmail({
+          to: target.customerEmail,
+          subject: emailSubject,
+          html,
+          text,
+          category: "ticket",
+        })
+      )
+      .catch((err) => console.error("[ticket.merged email]", err));
+  }
+
+  if (actionSettings.ticketMergeNotificationsEnabled) {
+    await ticketOwnerRecipients(
+      [source.assignedAgentId, target.assignedAgentId],
+      actor.id
+    )
+      .then(([sourceRecipients, targetRecipients]) =>
+        Promise.all([
+          createNotifications(sourceRecipients, {
+            type: "ticket_merged",
+            title: `${actor.name} merged #${source.ticketNumber} into #${target.ticketNumber}`,
+            body: `#${source.ticketNumber} "${source.subject}" is closed; its messages now continue in #${target.ticketNumber} "${target.subject}".`,
+            ticketId: target.id,
+            ticketNumber: target.ticketNumber,
+          }),
+          createNotifications(targetRecipients, {
+            type: "ticket_merged",
+            title: `${actor.name} merged #${source.ticketNumber} into #${target.ticketNumber}`,
+            body: `Messages and attachments from #${source.ticketNumber} "${source.subject}" were added to #${target.ticketNumber}.`,
+            ticketId: target.id,
+            ticketNumber: target.ticketNumber,
+          }),
+        ])
+      )
+      .catch((err) => console.error("[notification.ticket_merged]", err));
+  }
+
   // Irreversible, so it also goes in the admin audit log.
   await audit({
     action: "ticket.merged",
@@ -546,8 +618,8 @@ export async function mergeTickets(
   }).catch((err) => console.error("[audit.ticket_merged]", err));
 
   // Only ticket.merged — not also ticket.closed for the source, since
-  // integrators commonly email the customer on ticket.closed and a merge is
-  // deliberately silent.
+  // integrators commonly email the customer on ticket.closed, and the merge
+  // has its own customer email (above) when the admin wants one.
   await dispatchWebhookEvent("ticket.merged", "ticket", target.id, {
     ticket: ticketPayloadData({ ...target, updatedAt: now }),
     mergedTicket: ticketPayloadData({

@@ -19,6 +19,9 @@ import { COLOR_BADGE, formatTicketDateTime } from "@/lib/tickets";
 import { cn } from "@/lib/utils";
 
 interface Props {
+  /** Whether the merge emails the customer (admin settings) — only changes
+   * what the dialog promises; the server decides what's actually sent. */
+  emailsCustomer: boolean;
   onOpenChange: (open: boolean) => void;
   open: boolean;
   statuses: TicketStatus[];
@@ -34,6 +37,7 @@ type Targets =
  * Merges are same-customer and open-target only (lib/tickets/merge.ts), so the
  * customer's open-ticket list is the complete set of valid targets. */
 export function MergeTicketDialog({
+  emailsCustomer,
   ticket,
   open,
   onOpenChange,
@@ -129,9 +133,11 @@ export function MergeTicketDialog({
           </DialogTitle>
           <DialogDescription className="text-base-content-muted text-center">
             All messages and attachments from #{ticket.ticketNumber} move into
-            the ticket you pick, and #{ticket.ticketNumber} is closed. The
-            customer isn't emailed — their old link opens the merged ticket.
-            This can't be undone.
+            the ticket you pick, and #{ticket.ticketNumber} is closed.{" "}
+            {emailsCustomer
+              ? "The customer gets an email with a link to the merged ticket"
+              : "The customer isn't emailed"}{" "}
+            — their old link also opens it. This can't be undone.
           </DialogDescription>
         </DialogHeader>
 

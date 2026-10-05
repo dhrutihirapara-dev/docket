@@ -6,6 +6,11 @@ import { db } from "@/lib/db";
 import { DEFAULT_EMAIL_ACCENT } from "@/lib/email/components/layout";
 import { env } from "@/lib/env";
 import { storage } from "@/lib/storage";
+import {
+  DEFAULT_TICKET_ACTION_SETTINGS,
+  pickTicketActionSettings,
+  type TicketActionSettings,
+} from "@/lib/ticket-actions";
 
 // cache() dedupes repeat calls within one request — the root layout,
 // generateMetadata, and the agent/admin layouts each read this independently.
@@ -28,6 +33,7 @@ export const getPlatformSettings = cache(async () => {
       magicLinkEnabled: false,
       googleLoginEnabled: false,
       ticketEmailNotificationsEnabled: true,
+      ...DEFAULT_TICKET_ACTION_SETTINGS,
       brandName: null as string | null,
       logoKey: null as string | null,
       faviconKey: null as string | null,
@@ -35,6 +41,11 @@ export const getPlatformSettings = cache(async () => {
     }
   );
 });
+
+/** Admin switches for merge / split / link and their notifications. */
+export async function getTicketActionSettings(): Promise<TicketActionSettings> {
+  return pickTicketActionSettings(await getPlatformSettings());
+}
 
 /** The configured brand name, or the PRODUCT_NAME default when unset. */
 export function resolveBrandName(brandName: string | null | undefined): string {

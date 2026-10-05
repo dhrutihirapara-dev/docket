@@ -159,7 +159,8 @@ The full ticket view for agents. Split into two panels:
 - **Split** (icon on each customer reply) — moves that reply into a new ticket; the dialog
   asks for the new subject.
 - **Linked Tickets** (sidebar card) — add a `related_to` / `duplicate_of` / `blocks` link by
-  ticket number, or remove one.
+  ticket number, or remove one. Links also show as chips in the ticket header and as a
+  link icon in the ticket list; the other ticket's assignee gets a notification.
 - Opening `/tickets/{n}` for a merged ticket redirects to the ticket it was merged into.
 
 Full rules: [tickets.md § Merge, Split & Link](./tickets.md#merge-split--link).

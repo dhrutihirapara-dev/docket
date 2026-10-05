@@ -281,6 +281,11 @@ Activity history is displayed chronologically on the ticket detail page for agen
 
 ## Merge, Split & Link
 
+Each of the three can be turned off (and its notifications separately) under
+**Admin → Ticket Config → Ticket Actions** — see
+[admin-portal.md § Ticket Actions](./admin-portal.md#ticket-actions). The routes then return
+`403` and the UI hides the control; existing links stay visible read-only.
+
 Agent-only actions on the ticket detail page. Logic lives in `lib/tickets/merge.ts`,
 `lib/tickets/split.ts` and `lib/tickets/links.ts`.
 
@@ -293,7 +298,11 @@ another ticket (the **target**). Rules, all enforced server-side:
   target's token*; across customers that would hand one customer another's thread.
 - The target must be **open** — the customer is forwarded there and must be able to reply.
 - Neither ticket may already be merged; a ticket can't merge into itself.
-- **Irreversible**, and **silent** — the customer gets no email.
+- **Irreversible.** The customer gets the **Ticket Merged** email linking to the target
+  (an admin can turn it off under Ticket Config → Ticket Actions; see
+  [email-notifications.md § Ticket Merged](./email-notifications.md#4-ticket-merged)). Agents
+  who own either ticket get a `ticket_merged` in-app notification (see
+  [in-app-notifications.md](./in-app-notifications.md)).
 
 What happens, in one transaction:
 
@@ -342,7 +351,9 @@ attachments, and it is removed from the original (an internal note, back-dated t
 marks where it was). The
 new ticket copies category, priority, `source` and `apiKeyId` (so its portal link uses the same
 `portalUrlTemplate`), starts unassigned and awaiting reply, and is linked `related_to` the
-original. The customer receives the normal "ticket created" email with the new link. Agent
+original. The customer receives the normal "ticket created" email with the new link. The
+original's owner gets a `ticket_split` notification; every other active agent gets the usual
+`ticket_created` one (the new ticket is unassigned), plus OS push. Agent
 replies and internal notes can't be split.
 
 ### Link
@@ -352,13 +363,25 @@ The **Linked Tickets** sidebar card connects tickets without moving anything. Ty
 | Type | On the ticket that added it | On the other ticket |
 |---|---|---|
 | `related_to` | Related to #N | Related to #N |
-| `duplicate_of` | Duplicate of #N | Has duplicate #N |
+| `duplicate_of` | Duplicate of #N | Duplicated by #N |
 | `blocks` | Blocks #N | Blocked by #N |
 
 One `ticket_links` row per link, read from both ends. Self-links, links to merged tickets,
 and a second link of the same type between the same pair — in either direction (so no
 "A blocks B" plus "B blocks A") — are rejected. Links are agent-only —
 never shown to customers.
+
+So a teammate working the *other* ticket can't miss a link, it surfaces in four places:
+
+- **Ticket header** — a "Linked:" row of chips under the subject (type, `#N`, subject,
+  status), each linking to the other ticket.
+- **Sidebar card** — the "Linked Tickets" header shows a count even while collapsed; each
+  entry says who linked it ("Linked by …").
+- **Ticket list** — a link icon + count next to the subject; hover lists the numbers.
+- **Notification** — adding a link sends a `ticket_linked` in-app notification for each
+  end: to its assignee, or to all active agents/admins if it's unassigned (same routing as
+  `customer_replied`). The agent who added it is skipped, and each person gets at most one.
+  Removing a link only writes activity.
 
 ---
 

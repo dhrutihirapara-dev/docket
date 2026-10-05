@@ -9,6 +9,15 @@ attention. Notifications appear in the bell menu in the top bar, with an unread 
 |-------|------|------------|
 | New ticket submitted | `ticket_created` | All active (non-deactivated) agents and admins — a brand-new ticket has no assigned agent yet |
 | Customer replied to a ticket | `customer_replied` | Assigned agent if the ticket is assigned; otherwise all active (non-deactivated) agents and admins |
+| Ticket linked to another ticket | `ticket_linked` | Owners of both tickets* |
+| Ticket merged into another | `ticket_merged` | Owners of both tickets* — opens the ticket it was merged into |
+| Reply split into a new ticket | `ticket_split` / `ticket_created` | `ticket_split` to the original ticket's owner*; `ticket_created` to every other active agent/admin; OS push to both. Both open the new ticket |
+
+\* "Owner" = the ticket's assigned agent, or all active agents and admins if it's
+unassigned (`ticketOwnerRecipients()` in `lib/notifications.ts`). The agent who did the
+action is never notified, and nobody gets more than one notification for one action.
+Each of link / merge / split notifications can be switched off by an admin under
+**Admin → Ticket Config → Ticket Actions** (see [admin-portal.md](./admin-portal.md#ticket-actions)).
 
 > This zero-config routing means a solo self-hoster always gets the reply, teams only
 > ping the owner of an assigned ticket, and unowned tickets reach everyone.

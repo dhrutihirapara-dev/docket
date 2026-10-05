@@ -1,10 +1,17 @@
 import { createId } from "@paralleldrive/cuid2";
-import { and, asc, eq, or } from "drizzle-orm";
-import { ticketActivity, ticketLinks, tickets } from "@/db/schema";
+import { and, asc, eq, inArray, or } from "drizzle-orm";
+import { ticketActivity, ticketLinks, tickets, user } from "@/db/schema";
 import { db } from "@/lib/db";
-import type { TicketLinkType } from "@/lib/tickets/link-types";
+import {
+  createNotifications,
+  ticketOwnerRecipients,
+} from "@/lib/notifications";
+import { getTicketActionSettings } from "@/lib/settings";
+import { type TicketLinkType, ticketLinkLabel } from "@/lib/tickets/link-types";
 
 export interface TicketLinkView {
+  /** Who added the link — null if that user has since been deleted. */
+  createdByName: string | null;
   direction: "outgoing" | "incoming";
   id: string;
   ticket: {
@@ -33,10 +40,12 @@ export async function getTicketLinks(
         id: ticketLinks.id,
         type: ticketLinks.type,
         createdAt: ticketLinks.createdAt,
+        createdByName: user.name,
         ticket: otherTicketColumns,
       })
       .from(ticketLinks)
       .innerJoin(tickets, eq(ticketLinks.linkedTicketId, tickets.id))
+      .leftJoin(user, eq(ticketLinks.createdById, user.id))
       .where(eq(ticketLinks.ticketId, ticketId))
       .orderBy(asc(ticketLinks.createdAt)),
     db
@@ -44,10 +53,12 @@ export async function getTicketLinks(
         id: ticketLinks.id,
         type: ticketLinks.type,
         createdAt: ticketLinks.createdAt,
+        createdByName: user.name,
         ticket: otherTicketColumns,
       })
       .from(ticketLinks)
       .innerJoin(tickets, eq(ticketLinks.ticketId, tickets.id))
+      .leftJoin(user, eq(ticketLinks.createdById, user.id))
       .where(eq(ticketLinks.linkedTicketId, ticketId))
       .orderBy(asc(ticketLinks.createdAt)),
   ]);
@@ -61,6 +72,36 @@ export async function getTicketLinks(
       ...l,
       type: l.type as TicketLinkType,
     }));
+}
+
+/** For the ticket list: the numbers of every ticket linked to each of
+ * `ticketIds`, from either end. Tickets with no links are absent. */
+export async function getLinkedTicketNumbers(
+  ticketIds: string[]
+): Promise<Record<string, number[]>> {
+  if (ticketIds.length === 0) {
+    return {};
+  }
+  const [outgoing, incoming] = await Promise.all([
+    db
+      .select({ id: ticketLinks.ticketId, other: tickets.ticketNumber })
+      .from(ticketLinks)
+      .innerJoin(tickets, eq(ticketLinks.linkedTicketId, tickets.id))
+      .where(inArray(ticketLinks.ticketId, ticketIds)),
+    db
+      .select({ id: ticketLinks.linkedTicketId, other: tickets.ticketNumber })
+      .from(ticketLinks)
+      .innerJoin(tickets, eq(ticketLinks.ticketId, tickets.id))
+      .where(inArray(ticketLinks.linkedTicketId, ticketIds)),
+  ]);
+  const result: Record<string, number[]> = {};
+  for (const { id, other } of [...outgoing, ...incoming]) {
+    result[id] = [...(result[id] ?? []), other];
+  }
+  for (const numbers of Object.values(result)) {
+    numbers.sort((a, b) => a - b);
+  }
+  return result;
 }
 
 interface Actor {
@@ -84,6 +125,8 @@ export async function addTicketLink(
     .select({
       id: tickets.id,
       ticketNumber: tickets.ticketNumber,
+      subject: tickets.subject,
+      assignedAgentId: tickets.assignedAgentId,
       mergedIntoTicketId: tickets.mergedIntoTicketId,
     })
     .from(tickets)
@@ -97,6 +140,8 @@ export async function addTicketLink(
     .select({
       id: tickets.id,
       ticketNumber: tickets.ticketNumber,
+      subject: tickets.subject,
+      assignedAgentId: tickets.assignedAgentId,
       mergedIntoTicketId: tickets.mergedIntoTicketId,
     })
     .from(tickets)
@@ -179,6 +224,12 @@ export async function addTicketLink(
       }),
     ]);
   });
+
+  if ((await getTicketActionSettings()).ticketLinkNotificationsEnabled) {
+    await notifyTicketLinked(source, target, type, actor).catch((err) =>
+      console.error("[notification.ticket_linked]", err)
+    );
+  }
   return { ok: true };
 }
 
@@ -241,6 +292,53 @@ export async function removeTicketLink(
     ]);
   });
   return { ok: true };
+}
+
+interface LinkEnd {
+  assignedAgentId: string | null;
+  id: string;
+  subject: string;
+  ticketNumber: number;
+}
+
+/** Notifies the owners of both ends (see ticketOwnerRecipients), so a
+ * teammate working the other ticket learns about the link. If one person owns
+ * both, they get the message about the other ticket's end. */
+async function notifyTicketLinked(
+  source: LinkEnd,
+  target: LinkEnd,
+  type: TicketLinkType,
+  actor: Actor
+): Promise<void> {
+  const [targetRecipients, sourceRecipients] = await ticketOwnerRecipients(
+    [target.assignedAgentId, source.assignedAgentId],
+    actor.id
+  );
+
+  await Promise.all(
+    [
+      {
+        self: target,
+        other: source,
+        direction: "incoming" as const,
+        recipients: targetRecipients,
+      },
+      {
+        self: source,
+        other: target,
+        direction: "outgoing" as const,
+        recipients: sourceRecipients,
+      },
+    ].map(({ self, other, direction, recipients }) =>
+      createNotifications(recipients, {
+        type: "ticket_linked",
+        title: `${actor.name} linked #${self.ticketNumber} to #${other.ticketNumber}`,
+        body: `#${self.ticketNumber} "${self.subject}" is now ${ticketLinkLabel(type, direction).toLowerCase()} #${other.ticketNumber} "${other.subject}".`,
+        ticketId: self.id,
+        ticketNumber: self.ticketNumber,
+      })
+    )
+  );
 }
 
 function linkActivity(

@@ -1,6 +1,6 @@
 "use client";
 
-import { PencilSimpleLineIcon } from "@phosphor-icons/react";
+import { LinkSimpleIcon, PencilSimpleLineIcon } from "@phosphor-icons/react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -37,6 +37,8 @@ interface Row {
   /** The current agent has an unsent reply draft on this ticket. */
   hasDraft: boolean;
   id: string;
+  /** Numbers of tickets linked to this one (either direction). */
+  linkedTicketNumbers: number[];
   priority: string;
   slaSnapshot: SlaSnapshot;
   status: string;
@@ -348,6 +350,17 @@ export function TicketRow({
           >
             {row.subject}
           </Link>
+          {row.linkedTicketNumbers.length > 0 && (
+            <span
+              aria-label={`Linked to ${row.linkedTicketNumbers.map((n) => `#${n}`).join(", ")}`}
+              className="mt-0.5 inline-flex shrink-0 items-center gap-0.5 text-[11px] text-base-content-muted"
+              role="img"
+              title={`Linked to ${row.linkedTicketNumbers.map((n) => `#${n}`).join(", ")}`}
+            >
+              <LinkSimpleIcon className="size-3.5" weight="bold" />
+              {row.linkedTicketNumbers.length}
+            </span>
+          )}
         </div>
       </td>
       {visibleColumns.map((c) => (

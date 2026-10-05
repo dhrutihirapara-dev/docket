@@ -45,6 +45,8 @@ interface Row {
   /** The current agent has an unsent reply draft on this ticket. */
   hasDraft: boolean;
   id: string;
+  /** Numbers of tickets linked to this one (either direction). */
+  linkedTicketNumbers: number[];
   priority: string;
   slaSnapshot: SlaSnapshot;
   status: string;

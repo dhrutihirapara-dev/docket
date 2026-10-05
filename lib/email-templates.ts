@@ -13,6 +13,7 @@ export type EmailTemplateType =
   | "ticket_created"
   | "ticket_replied"
   | "ticket_closed"
+  | "ticket_merged"
   | "my_tickets_list";
 
 interface MergeTag {
@@ -162,6 +163,56 @@ export const EMAIL_TEMPLATE_TYPES: EmailTemplateMeta[] = [
       { tag: "ticketNumber", description: "e.g. 1042" },
       { tag: "ticketSubject", description: "The ticket's subject line" },
       { tag: "ticketUrl", description: "Link to view (and reopen) the ticket" },
+      { tag: "brandName", description: "Your configured brand name" },
+    ],
+  },
+  {
+    type: "ticket_merged",
+    label: "Ticket Merged",
+    description:
+      "Sent to the customer when an agent merges one of their tickets into another.",
+    defaultSubject:
+      "[#{{mergedTicketNumber}}] Your ticket has been merged into #{{ticketNumber}} — {{ticketSubject}}",
+    gatedByTicketToggle: true,
+    defaultBody: doc(
+      heading("Your tickets have been combined"),
+      paragraph(run("Hi "), run("{{customerName}}"), run(",")),
+      paragraph(
+        run("Your support ticket "),
+        bold("#{{mergedTicketNumber}}"),
+        run(" ("),
+        run("{{mergedTicketSubject}}"),
+        run(") was about the same request as ticket "),
+        bold("#{{ticketNumber}}"),
+        run(
+          ", so we merged them into one. All your messages and attachments are now there, and our team will continue on it."
+        )
+      ),
+      paragraph(run("Subject: "), run("{{ticketSubject}}")),
+      paragraph(run("View your ticket: "), run("{{ticketUrl}}"))
+    ),
+    mergeTags: [
+      { tag: "customerName", description: "Customer's name" },
+      {
+        tag: "mergedTicketNumber",
+        description: "The ticket that was merged away, e.g. 1043",
+      },
+      {
+        tag: "mergedTicketSubject",
+        description: "Subject of the ticket that was merged away",
+      },
+      {
+        tag: "ticketNumber",
+        description: "The ticket it was merged into, e.g. 1042",
+      },
+      {
+        tag: "ticketSubject",
+        description: "Subject of the ticket it was merged into",
+      },
+      {
+        tag: "ticketUrl",
+        description: "Link to the ticket it was merged into",
+      },
       { tag: "brandName", description: "Your configured brand name" },
     ],
   },
@@ -454,6 +505,14 @@ const SAMPLE_VARS: Record<EmailTemplateType, Record<string, string>> = {
   },
   ticket_closed: {
     customerName: "Jane Doe",
+    ticketNumber: "1042",
+    ticketSubject: "Cannot log in",
+    ticketUrl: "https://support.example.com/ticket/cku1a2b3c4d5e6f?token=...",
+  },
+  ticket_merged: {
+    customerName: "Jane Doe",
+    mergedTicketNumber: "1043",
+    mergedTicketSubject: "Login still broken",
     ticketNumber: "1042",
     ticketSubject: "Cannot log in",
     ticketUrl: "https://support.example.com/ticket/cku1a2b3c4d5e6f?token=...",

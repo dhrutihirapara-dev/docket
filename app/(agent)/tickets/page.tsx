@@ -31,6 +31,7 @@ import {
   type TicketPriority,
   type TicketStatus,
 } from "@/lib/ticket-config";
+import { getLinkedTicketNumbers } from "@/lib/tickets/links";
 import { getDraftTicketIds } from "@/lib/tickets/reply-drafts";
 import {
   buildTicketsWhereClause,
@@ -309,27 +310,29 @@ async function TicketsResults({
   );
   const ticketIds = rows.map((r) => r.id);
 
-  const [tagsByTicket, updatedByRows, draftTicketIds] = await Promise.all([
-    visibleColumnIds.has("tags")
-      ? getTicketTagsForTickets(ticketIds)
-      : Promise.resolve({} as Record<string, string[]>),
-    visibleColumnIds.has("updatedBy") && ticketIds.length > 0
-      ? db
-          .selectDistinctOn([ticketActivity.ticketId], {
-            ticketId: ticketActivity.ticketId,
-            actorName: ticketActivity.actorName,
-          })
-          .from(ticketActivity)
-          .where(
-            and(
-              inArray(ticketActivity.ticketId, ticketIds),
-              inArray(ticketActivity.actorRole, [AGENT_ROLE, ADMIN_ROLE])
+  const [tagsByTicket, updatedByRows, draftTicketIds, linkedByTicket] =
+    await Promise.all([
+      visibleColumnIds.has("tags")
+        ? getTicketTagsForTickets(ticketIds)
+        : Promise.resolve({} as Record<string, string[]>),
+      visibleColumnIds.has("updatedBy") && ticketIds.length > 0
+        ? db
+            .selectDistinctOn([ticketActivity.ticketId], {
+              ticketId: ticketActivity.ticketId,
+              actorName: ticketActivity.actorName,
+            })
+            .from(ticketActivity)
+            .where(
+              and(
+                inArray(ticketActivity.ticketId, ticketIds),
+                inArray(ticketActivity.actorRole, [AGENT_ROLE, ADMIN_ROLE])
+              )
             )
-          )
-          .orderBy(ticketActivity.ticketId, desc(ticketActivity.createdAt))
-      : Promise.resolve([]),
-    getDraftTicketIds(ticketIds, agentId),
-  ]);
+            .orderBy(ticketActivity.ticketId, desc(ticketActivity.createdAt))
+        : Promise.resolve([]),
+      getDraftTicketIds(ticketIds, agentId),
+      getLinkedTicketNumbers(ticketIds),
+    ]);
   const updatedByTicket = Object.fromEntries(
     updatedByRows.map((r) => [r.ticketId, r.actorName])
   );
@@ -341,6 +344,7 @@ async function TicketsResults({
     ...r,
     tags: tagsByTicket[r.id] ?? [],
     hasDraft: draftTicketIds.has(r.id),
+    linkedTicketNumbers: linkedByTicket[r.id] ?? [],
     updatedByName: updatedByTicket[r.id] ?? null,
     slaSnapshot: computeSlaSnapshot(
       r,

@@ -1,5 +1,7 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
+import { getTicketActionSettings } from "@/lib/settings";
+import { TICKET_ACTION_DISABLED_MESSAGES } from "@/lib/ticket-actions";
 import { getTicketAgent } from "@/lib/tickets/agent-session";
 import { readJsonObject } from "@/lib/tickets/route-input";
 import { splitComment } from "@/lib/tickets/split";
@@ -13,6 +15,12 @@ export async function POST(
   const agent = await getTicketAgent(request);
   if (!agent) {
     return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+  }
+  if (!(await getTicketActionSettings()).ticketSplitEnabled) {
+    return NextResponse.json(
+      { error: TICKET_ACTION_DISABLED_MESSAGES.split },
+      { status: 403 }
+    );
   }
 
   const { id } = await params;

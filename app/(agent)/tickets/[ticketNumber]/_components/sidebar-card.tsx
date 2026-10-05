@@ -3,6 +3,7 @@
 import { CaretDownIcon } from "@phosphor-icons/react";
 import type { ReactNode } from "react";
 import { useState } from "react";
+import { Badge } from "@/components/ui/badge";
 import {
   Collapsible,
   CollapsibleContent,
@@ -14,6 +15,9 @@ interface Props {
   children: ReactNode;
   className?: string;
   contentClassName?: string;
+  /** Shown as a small pill after the title so a collapsed section still says
+   *  it has content (e.g. how many linked tickets). Hidden when 0/undefined. */
+  count?: number;
   defaultOpen?: boolean;
   icon?: ReactNode;
   onOpenChange?: (open: boolean) => void;
@@ -30,6 +34,7 @@ export function SidebarCard({
   title,
   icon,
   children,
+  count,
   defaultOpen = true,
   open: controlledOpen,
   onOpenChange: controlledOnOpenChange,
@@ -59,6 +64,9 @@ export function SidebarCard({
         >
           {icon}
           {title}
+          {count ? (
+            <Badge className="badge-xs badge-primary">{count}</Badge>
+          ) : null}
         </h3>
         <CaretDownIcon
           className={cn(

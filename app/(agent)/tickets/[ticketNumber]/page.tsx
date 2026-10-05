@@ -3,6 +3,7 @@ import {
   CaretLeftIcon,
   CaretRightIcon,
   GitMergeIcon,
+  LinkSimpleIcon,
   LockSimpleIcon,
 } from "@phosphor-icons/react/dist/ssr";
 import { and, asc, desc, eq, gt, lt, or } from "drizzle-orm";
@@ -28,12 +29,13 @@ import { getCannedResponses } from "@/lib/canned-responses";
 import { getCustomFieldValues } from "@/lib/custom-fields";
 import { db } from "@/lib/db";
 import { isRichTextEmpty } from "@/lib/rich-text";
+// import { getSlaPolicies, resolveSlaPolicy } from "@/lib/sla-policies";
+import { getPlatformSettings, getTicketActionSettings } from "@/lib/settings";
 import {
   computeSlaSnapshot,
   computeWaitingTimeSeconds,
   waitingTimeSecondsSql,
 } from "@/lib/sla";
-// import { getSlaPolicies, resolveSlaPolicy } from "@/lib/sla-policies";
 import { storage } from "@/lib/storage";
 import { getTicketTags } from "@/lib/tags";
 import {
@@ -43,6 +45,7 @@ import {
 } from "@/lib/ticket-config";
 import { COLOR_BADGE } from "@/lib/tickets";
 import { canDeleteAttachment } from "@/lib/tickets/attachment-permissions";
+import { ticketLinkLabel } from "@/lib/tickets/link-types";
 import { getTicketLinks } from "@/lib/tickets/links";
 import { getReplyDraft } from "@/lib/tickets/reply-drafts";
 import {
@@ -291,6 +294,8 @@ export default async function AgentTicketDetailPage({
     sendReplyOnEnter,
     replyDraft,
     links,
+    ticketActions,
+    platformSettings,
     // showSlaAndOverdue,
   ] = await Promise.all([
     getTicketCategories(),
@@ -316,6 +321,8 @@ export default async function AgentTicketDetailPage({
     getSendReplyOnEnterPref(session.id),
     getReplyDraft(ticket.id, session.id),
     getTicketLinks(ticket.id),
+    getTicketActionSettings(),
+    getPlatformSettings(),
     // getShowSlaAndOverduePref(session.id),
   ]);
 
@@ -460,6 +467,41 @@ export default async function AgentTicketDetailPage({
                   <h1 className="text-lg font-semibold text-base-content wrap-break-word">
                     {ticket.subject}
                   </h1>
+                  {/* Linked tickets up front, not only in the (collapsed)
+                      sidebar section — so an agent opening this ticket sees
+                      that a teammate tied it to other work. */}
+                  {links.length > 0 && (
+                    <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                      <span className="inline-flex items-center gap-1 text-xs text-base-content-muted">
+                        <LinkSimpleIcon className="size-3.5" />
+                        Linked:
+                      </span>
+                      {links.map((link) => (
+                        <Link
+                          className="inline-flex max-w-full items-center gap-1 rounded-field border border-base-300 bg-base-200 px-2 py-0.5 text-xs text-base-content transition-colors hover:bg-base-300"
+                          href={`/tickets/${link.ticket.ticketNumber}`}
+                          key={link.id}
+                          title={`${ticketLinkLabel(link.type, link.direction)} #${link.ticket.ticketNumber} — ${link.ticket.subject}${link.createdByName ? ` (linked by ${link.createdByName})` : ""}`}
+                        >
+                          <span className="shrink-0 text-base-content-muted">
+                            {ticketLinkLabel(link.type, link.direction)}
+                          </span>
+                          <span className="shrink-0 font-mono font-medium">
+                            #{link.ticket.ticketNumber}
+                          </span>
+                          <span className="truncate">
+                            {link.ticket.subject}
+                          </span>
+                          <span
+                            className={`ml-0.5 shrink-0 rounded border px-1 text-[10px] font-medium ${COLOR_BADGE[statusMap[link.ticket.status]?.color ?? "slate"] ?? ""}`}
+                          >
+                            {statusMap[link.ticket.status]?.label ??
+                              link.ticket.status}
+                          </span>
+                        </Link>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <span
                   className={`inline-flex items-center rounded border px-2.5 py-1 text-xs font-medium shrink-0 ${COLOR_BADGE[statusMap[ticket.status]?.color ?? "slate"] ?? ""}`}
@@ -577,14 +619,16 @@ export default async function AgentTicketDetailPage({
                       <span className="text-xs text-base-content-muted ml-auto shrink-0">
                         <LocalDateTime date={comment.createdAt} />
                       </span>
-                      {isCustomer && !comment.isInternal && (
-                        <SplitCommentButton
-                          commentId={comment.id}
-                          ticketId={ticket.id}
-                          ticketNumber={ticket.ticketNumber}
-                          ticketSubject={ticket.subject}
-                        />
-                      )}
+                      {ticketActions.ticketSplitEnabled &&
+                        isCustomer &&
+                        !comment.isInternal && (
+                          <SplitCommentButton
+                            commentId={comment.id}
+                            ticketId={ticket.id}
+                            ticketNumber={ticket.ticketNumber}
+                            ticketSubject={ticket.subject}
+                          />
+                        )}
                     </div>
                     {!isRichTextEmpty(comment.content) && (
                       <RichTextContent content={comment.content} />
@@ -651,11 +695,17 @@ export default async function AgentTicketDetailPage({
           <TicketInfoSidebar
             activity={activity}
             agents={agents}
+            canLink={ticketActions.ticketLinkEnabled}
+            canMerge={ticketActions.ticketMergeEnabled}
             categories={categories}
             currentUserId={session.id}
             customFields={customFields}
             isAdmin={session.role === ADMIN_ROLE}
             links={links}
+            mergeEmailsCustomer={
+              ticketActions.ticketMergeCustomerEmailEnabled &&
+              platformSettings.ticketEmailNotificationsEnabled
+            }
             priorities={priorities}
             showSlaAndOverdue={showSlaAndOverdue}
             slaSnapshot={slaSnapshot}

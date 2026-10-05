@@ -30,12 +30,19 @@ import {
 import type { TicketLinkView } from "@/lib/tickets/links";
 
 interface Props {
+  /** False when an admin turned linking off — links are shown read-only. */
+  editable: boolean;
   initialLinks: TicketLinkView[];
   statuses: TicketStatus[];
   ticketId: string;
 }
 
-export function TicketLinks({ ticketId, initialLinks, statuses }: Props) {
+export function TicketLinks({
+  editable,
+  ticketId,
+  initialLinks,
+  statuses,
+}: Props) {
   const router = useRouter();
   const statusMap = Object.fromEntries(statuses.map((s) => [s.slug, s]));
   const [links, setLinks] = useState(initialLinks);
@@ -120,15 +127,17 @@ export function TicketLinks({ ticketId, initialLinks, statuses }: Props) {
               >
                 {status?.label ?? link.ticket.status}
               </span>
-              <Button
-                aria-label={`Remove link to #${link.ticket.ticketNumber}`}
-                className="shrink-0 text-base-content-muted hover:text-base-content"
-                onClick={() => removeLink(link)}
-                size="icon-xs"
-                variant="ghost"
-              >
-                <XIcon className="size-3" />
-              </Button>
+              {editable && (
+                <Button
+                  aria-label={`Remove link to #${link.ticket.ticketNumber}`}
+                  className="shrink-0 text-base-content-muted hover:text-base-content"
+                  onClick={() => removeLink(link)}
+                  size="icon-xs"
+                  variant="ghost"
+                >
+                  <XIcon className="size-3" />
+                </Button>
+              )}
             </div>
             <Link
               className="block truncate text-base-content hover:underline"
@@ -138,74 +147,81 @@ export function TicketLinks({ ticketId, initialLinks, statuses }: Props) {
               <span className="font-mono">#{link.ticket.ticketNumber}</span>{" "}
               {link.ticket.subject}
             </Link>
+            {link.createdByName && (
+              <p className="truncate text-[11px] text-base-content-muted">
+                Linked by {link.createdByName}
+              </p>
+            )}
           </div>
         );
       })}
 
-      <Popover
-        onOpenChange={(o) => {
-          setOpen(o);
-          if (!o) {
-            setTicketNumber("");
-          }
-        }}
-        open={open}
-      >
-        <PopoverTrigger asChild>
-          <button
-            className="inline-flex items-center gap-1 rounded border border-dashed border-base-300 px-2 py-1 text-xs text-base-content-muted hover:text-base-content hover:border-base-content-muted transition-colors cursor-pointer"
-            type="button"
-          >
-            <PlusIcon className="size-3" />
-            Link ticket
-          </button>
-        </PopoverTrigger>
-        <PopoverContent align="start" className="w-60 space-y-2 p-3">
-          <p className="text-xs text-base-content-muted">This ticket is…</p>
-          <Select
-            onValueChange={(v) => setType(v as TicketLinkType)}
-            value={type}
-          >
-            <SelectTrigger
-              aria-label="Link type"
-              className="h-8 w-full text-xs"
+      {editable && (
+        <Popover
+          onOpenChange={(o) => {
+            setOpen(o);
+            if (!o) {
+              setTicketNumber("");
+            }
+          }}
+          open={open}
+        >
+          <PopoverTrigger asChild>
+            <button
+              className="inline-flex items-center gap-1 rounded border border-dashed border-base-300 px-2 py-1 text-xs text-base-content-muted hover:text-base-content hover:border-base-content-muted transition-colors cursor-pointer"
+              type="button"
             >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {TICKET_LINK_TYPES.map((t) => (
-                <SelectItem key={t} value={t}>
-                  {TICKET_LINK_TYPE_LABELS[t]}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Input
-            aria-label="Ticket number"
-            autoFocus
-            className="h-8 text-xs"
-            disabled={busy}
-            inputMode="numeric"
-            onChange={(e) => setTicketNumber(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                addLink();
-              }
-            }}
-            placeholder="Ticket number, e.g. 1042"
-            value={ticketNumber}
-          />
-          <Button
-            className="w-full text-xs"
-            disabled={busy || !ticketNumber.trim()}
-            onClick={addLink}
-            size="sm"
-          >
-            {busy ? "Linking…" : "Link"}
-          </Button>
-        </PopoverContent>
-      </Popover>
+              <PlusIcon className="size-3" />
+              Link ticket
+            </button>
+          </PopoverTrigger>
+          <PopoverContent align="start" className="w-60 space-y-2 p-3">
+            <p className="text-xs text-base-content-muted">This ticket is…</p>
+            <Select
+              onValueChange={(v) => setType(v as TicketLinkType)}
+              value={type}
+            >
+              <SelectTrigger
+                aria-label="Link type"
+                className="h-8 w-full text-xs"
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {TICKET_LINK_TYPES.map((t) => (
+                  <SelectItem key={t} value={t}>
+                    {TICKET_LINK_TYPE_LABELS[t]}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <Input
+              aria-label="Ticket number"
+              autoFocus
+              className="h-8 text-xs"
+              disabled={busy}
+              inputMode="numeric"
+              onChange={(e) => setTicketNumber(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  addLink();
+                }
+              }}
+              placeholder="Ticket number, e.g. 1042"
+              value={ticketNumber}
+            />
+            <Button
+              className="w-full text-xs"
+              disabled={busy || !ticketNumber.trim()}
+              onClick={addLink}
+              size="sm"
+            >
+              {busy ? "Linking…" : "Link"}
+            </Button>
+          </PopoverContent>
+        </Popover>
+      )}
     </div>
   );
 }

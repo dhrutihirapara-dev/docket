@@ -14,10 +14,16 @@ import { enqueueEmail } from "@/lib/email";
 import { ticketCreatedTemplate } from "@/lib/email/templates/ticket-created";
 import { env } from "@/lib/env";
 import {
+  createNotifications,
+  ticketOwnerRecipients,
+} from "@/lib/notifications";
+import { publishPushToUsers } from "@/lib/push";
+import {
   publishTicketCommentCreated,
   publishTicketCreated,
 } from "@/lib/realtime";
 import { textToRichTextJson } from "@/lib/rich-text";
+import { getTicketActionSettings } from "@/lib/settings";
 import { getDefaultStatus, isClosedStatusSlug } from "@/lib/ticket-config";
 import { resolveTicketPortalUrl } from "@/lib/tickets/portal-url";
 import {
@@ -75,6 +81,7 @@ export async function splitComment(
       source: tickets.source,
       apiKeyId: tickets.apiKeyId,
       mergedIntoTicketId: tickets.mergedIntoTicketId,
+      assignedAgentId: tickets.assignedAgentId,
       awaitingReply: tickets.awaitingReply,
       waitingSince: tickets.waitingSince,
       createdAt: tickets.createdAt,
@@ -283,6 +290,39 @@ export async function splitComment(
       })
     )
     .catch((err) => console.error("[ticket.split email]", err));
+
+  // Agents: the original's owner learns a message moved out of their ticket;
+  // everyone else gets the usual "new ticket" ping, since the new ticket starts
+  // unassigned and awaiting a reply. Both open the new ticket.
+  if ((await getTicketActionSettings()).ticketSplitNotificationsEnabled) {
+    await ticketOwnerRecipients([original.assignedAgentId, null], actor.id)
+      .then(async ([ownerRecipients, everyoneElse]) => {
+        const newTicketTitle = `New ticket #${newTicketNumber} from ${original.customerName}`;
+        await Promise.all([
+          createNotifications(ownerRecipients, {
+            type: "ticket_split",
+            title: `${actor.name} split a reply from #${original.ticketNumber} into #${newTicketNumber}`,
+            body: `New ticket #${newTicketNumber} "${subject}" is unassigned and awaiting a reply.`,
+            ticketId: newTicketId,
+            ticketNumber: newTicketNumber,
+          }),
+          createNotifications(everyoneElse, {
+            type: "ticket_created",
+            title: newTicketTitle,
+            body: `${subject} (split from #${original.ticketNumber})`,
+            ticketId: newTicketId,
+            ticketNumber: newTicketNumber,
+          }),
+          publishPushToUsers([...ownerRecipients, ...everyoneElse], {
+            title: newTicketTitle,
+            body: subject,
+            deepLink: `${env.NEXT_PUBLIC_APP_URL}/tickets/${newTicketNumber}`,
+            tag: `ticket-${newTicketNumber}`,
+          }),
+        ]);
+      })
+      .catch((err) => console.error("[notification.ticket_split]", err));
+  }
 
   await audit({
     action: "ticket.split",

@@ -445,6 +445,13 @@ push_subscriptions
 └── updated_at         timestamp with time zone NOT NULL DEFAULT NOW()
 ```
 
+`platform_settings` gained seven ticket-action switches, all `boolean NOT NULL DEFAULT true`
+(Admin → Ticket Config → Ticket Actions): `ticket_merge_enabled`,
+`ticket_merge_notifications_enabled`, `ticket_merge_customer_email_enabled`,
+`ticket_split_enabled`,
+`ticket_split_notifications_enabled`, `ticket_link_enabled`,
+`ticket_link_notifications_enabled`.
+
 `integration_settings` also gained `push_provider` (`pusher` | `webpush`, null = env/`pusher`) and the Web Push VAPID columns (`web_push_vapid_public_key`, `web_push_vapid_private_key_encrypted`, plus the usual `web_push_last_test_*` trio).
 
 ---

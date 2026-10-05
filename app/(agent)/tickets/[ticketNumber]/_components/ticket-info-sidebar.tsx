@@ -67,11 +67,16 @@ interface Activity {
 interface Props {
   activity: Activity[];
   agents: Agent[];
+  /** Admin switches (Admin → Ticket Config → Ticket Actions). */
+  canLink: boolean;
+  canMerge: boolean;
   categories: TicketCategory[];
   currentUserId: string;
   customFields: CustomFieldWithValue[];
   isAdmin?: boolean;
   links: TicketLinkView[];
+  /** A merge sends the customer the "Ticket Merged" email. */
+  mergeEmailsCustomer: boolean;
   priorities: TicketPriority[];
   /** The agent's "Show SLA & Overdue" preference (lib/sla-display-pref.ts) —
    * off shows only the waiting time, not SLA/overdue badges, same as the
@@ -103,6 +108,8 @@ export function TicketInfoSidebar({
   ticket,
   agents,
   activity,
+  canLink,
+  canMerge,
   statuses,
   categories,
   priorities,
@@ -113,6 +120,7 @@ export function TicketInfoSidebar({
   currentUserId,
   isAdmin = false,
   links,
+  mergeEmailsCustomer,
 }: Props) {
   const statusMap = Object.fromEntries(statuses.map((s) => [s.slug, s]));
   const categoryMap = Object.fromEntries(categories.map((c) => [c.slug, c]));
@@ -466,16 +474,18 @@ export function TicketInfoSidebar({
           {/* Short label on purpose: buttons are uppercase + nowrap, and a
               longer one overflows the 18rem sidebar. The dialog explains the
               rest ("merge into which ticket"). */}
-          <Button
-            className="w-full border-base-300 text-base-content hover:bg-base-300 text-xs"
-            disabled={loading}
-            onClick={() => setMergeOpen(true)}
-            size="sm"
-            variant="outline"
-          >
-            <GitMergeIcon className="size-3.5" />
-            Merge Ticket
-          </Button>
+          {canMerge && (
+            <Button
+              className="w-full border-base-300 text-base-content hover:bg-base-300 text-xs"
+              disabled={loading}
+              onClick={() => setMergeOpen(true)}
+              size="sm"
+              variant="outline"
+            >
+              <GitMergeIcon className="size-3.5" />
+              Merge Ticket
+            </Button>
+          )}
         </div>
 
         {error && <p className="text-xs text-red-600">{error}</p>}
@@ -529,15 +539,23 @@ export function TicketInfoSidebar({
         <TicketTags initialTags={tags} ticketId={ticket.id} />
       </SidebarCard>
 
-      {/* Linked Tickets */}
-      <SidebarCard title="Linked Tickets" {...accordionProps("links")}>
-        <TicketLinks
-          initialLinks={links}
-          key={ticket.id}
-          statuses={statuses}
-          ticketId={ticket.id}
-        />
-      </SidebarCard>
+      {/* Linked Tickets — with linking off, existing links stay visible
+          (read-only); with none, the card has nothing to show. */}
+      {(canLink || links.length > 0) && (
+        <SidebarCard
+          count={links.length}
+          title="Linked Tickets"
+          {...accordionProps("links")}
+        >
+          <TicketLinks
+            editable={canLink}
+            initialLinks={links}
+            key={ticket.id}
+            statuses={statuses}
+            ticketId={ticket.id}
+          />
+        </SidebarCard>
+      )}
 
       {/* Custom Fields */}
       {customFields.length > 0 && (
@@ -689,6 +707,7 @@ export function TicketInfoSidebar({
       </Dialog>
 
       <MergeTicketDialog
+        emailsCustomer={mergeEmailsCustomer}
         onOpenChange={setMergeOpen}
         open={mergeOpen}
         statuses={statuses}

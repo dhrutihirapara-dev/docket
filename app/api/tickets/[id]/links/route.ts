@@ -1,5 +1,7 @@
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
+import { getTicketActionSettings } from "@/lib/settings";
+import { TICKET_ACTION_DISABLED_MESSAGES } from "@/lib/ticket-actions";
 import { getTicketAgent } from "@/lib/tickets/agent-session";
 import { isTicketLinkType } from "@/lib/tickets/link-types";
 import { addTicketLink, getTicketLinks } from "@/lib/tickets/links";
@@ -40,6 +42,12 @@ export async function POST(
   const agent = await getTicketAgent(request);
   if (!agent) {
     return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
+  }
+  if (!(await getTicketActionSettings()).ticketLinkEnabled) {
+    return NextResponse.json(
+      { error: TICKET_ACTION_DISABLED_MESSAGES.link },
+      { status: 403 }
+    );
   }
 
   const { id } = await params;
