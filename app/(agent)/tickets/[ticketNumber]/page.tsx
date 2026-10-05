@@ -478,7 +478,7 @@ export default async function AgentTicketDetailPage({
                       </span>
                       {links.map((link) => (
                         <Link
-                          className="inline-flex max-w-full items-center gap-1 rounded-field border border-base-300 bg-base-200 px-2 py-0.5 text-xs text-base-content transition-colors hover:bg-base-300"
+                          className="inline-flex max-w-full items-center gap-1 rounded-field border border-base-300 bg-base-300/30 px-2 py-0.5 text-xs text-base-content transition-colors hover:bg-base-300"
                           href={`/tickets/${link.ticket.ticketNumber}`}
                           key={link.id}
                           title={`${ticketLinkLabel(link.type, link.direction)} #${link.ticket.ticketNumber} — ${link.ticket.subject}${link.createdByName ? ` (linked by ${link.createdByName})` : ""}`}

@@ -160,7 +160,7 @@ export function TicketActionsSettingsForm({ initialSettings }: Props) {
                   is off, since a disabled action sends nothing anyway. */}
               {action.subSettings.map((sub) => (
                 <div
-                  className={`ml-7 flex items-center justify-between gap-4 rounded-field bg-base-200 px-3 py-2.5 ${enabled ? "" : "opacity-50"}`}
+                  className={`ml-7 flex items-center justify-between gap-4 rounded-field bg-base-300/40 px-3 py-2.5 ${enabled ? "" : "opacity-50"}`}
                   key={sub.key}
                 >
                   <div className="min-w-0">
