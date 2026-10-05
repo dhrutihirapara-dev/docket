@@ -4,12 +4,14 @@ import {
   ArrowDownIcon,
   ArrowsDownUpIcon,
   ArrowUpIcon,
+  GitMergeIcon,
   TrashIcon,
   WarningCircleIcon,
 } from "@phosphor-icons/react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
+import { MergeTicketsDialog } from "@/components/agent/merge-tickets-dialog";
 import { SearchableSelect } from "@/components/common/searchable-select";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -41,6 +43,7 @@ interface Row {
   assignedAgentId: string | null;
   assignedAgentName: string | null;
   category: string;
+  customerId: string;
   customerName: string;
   /** The current agent has an unsent reply draft on this ticket. */
   hasDraft: boolean;
@@ -98,6 +101,8 @@ export function TicketsTable({
   priorities,
   agents,
   isAdmin,
+  canMerge,
+  mergeEmailsCustomer,
   columnPrefs,
   listQuery,
   showSlaAndOverdue,
@@ -110,6 +115,10 @@ export function TicketsTable({
   priorities: TicketPriority[];
   agents: Agent[];
   isAdmin: boolean;
+  /** Merging is switched on (admin settings → Ticket Actions). */
+  canMerge: boolean;
+  /** Whether a merge emails the customer — shown in the merge dialog. */
+  mergeEmailsCustomer: boolean;
   columnPrefs: ColumnPref[];
   /** Current filter/sort/page query string (e.g. "?status=open&sort=id") —
    * carried onto each row's ticket link so the detail page's Previous/Next
@@ -120,6 +129,9 @@ export function TicketsTable({
   showSlaAndOverdue: boolean;
 }) {
   const visibleColumns = columnPrefs.filter((c) => c.visible);
+  // Admins select for every bulk action; agents only to merge, so they get
+  // checkboxes only while merging is switched on.
+  const canSelect = isAdmin || canMerge;
   const router = useRouter();
   const searchParams = useSearchParams();
   // Seeded from the server prop but never re-synced to it — see the note above
@@ -156,6 +168,7 @@ export function TicketsTable({
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [mergeOpen, setMergeOpen] = useState(false);
   const [closeConfirm, setCloseConfirm] = useState<{
     rowId: string;
     status: string;
@@ -297,6 +310,15 @@ export function TicketsTable({
     }
   }
 
+  /** Merged-away tickets are now hidden shells (the list query excludes
+   * them), so drop them locally and clear the selection. */
+  function handleMerged(mergedIds: string[]) {
+    const merged = new Set(mergedIds);
+    setRows((prev) => prev.filter((r) => !merged.has(r.id)));
+    setSelected(new Set());
+    router.refresh();
+  }
+
   async function handleConfirmClose() {
     if (!closeConfirm) {
       return;
@@ -334,8 +356,10 @@ export function TicketsTable({
 
   return (
     <>
-      {/* Bulk action bar — admin only, shown when rows are selected */}
-      {isAdmin && someSelected && (
+      {/* Bulk action bar, shown when rows are selected. Agents get only Merge
+          (its route allows agents); every other action is admin-only, as
+          /api/tickets/bulk enforces. */}
+      {canSelect && someSelected && (
         <div className="flex flex-wrap items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-4 py-2.5">
           <span className="text-sm font-medium text-base-content">
             {selectedCount} selected
@@ -348,72 +372,97 @@ export function TicketsTable({
             Clear
           </button>
           <div className="ml-auto flex flex-wrap items-center gap-2">
-            <SearchableSelect
-              disabled={busy}
-              onValueChange={(v) =>
-                runBulk({
-                  action: "assign",
-                  value: v === "unassigned" ? null : v,
-                })
-              }
-              options={[
-                { value: "unassigned", label: "Unassign" },
-                ...agents.map((a) => ({
-                  value: a.id,
-                  label: a.name ?? a.email,
-                })),
-              ]}
-              placeholder="Assign to…"
-              searchPlaceholder="Search agents…"
-              triggerClassName="h-9 w-44"
-              value=""
-            />
-            <Select
-              disabled={busy}
-              onValueChange={(v) => runBulk({ action: "status", value: v })}
-              value=""
-            >
-              <SelectTrigger className="h-9 w-44">
-                <SelectValue placeholder="Change status…" />
-              </SelectTrigger>
-              <SelectContent>
-                {statuses.map((s) => (
-                  <SelectItem key={s.slug} value={s.slug}>
-                    {s.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <Select
-              disabled={busy}
-              onValueChange={(v) => runBulk({ action: "priority", value: v })}
-              value=""
-            >
-              <SelectTrigger className="h-9 w-44">
-                <SelectValue placeholder="Change priority…" />
-              </SelectTrigger>
-              <SelectContent>
-                {priorities.map((p) => (
-                  <SelectItem key={p.slug} value={p.slug}>
-                    {p.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            <BulkTagSelect
-              disabled={busy}
-              onSelect={(name) => runBulk({ action: "tag", value: name })}
-            />
-            <Button
-              className="h-9"
-              disabled={busy}
-              onClick={() => setDeleteOpen(true)}
-              size="sm"
-              variant="destructive"
-            >
-              <TrashIcon className="size-4" />
-              Delete
-            </Button>
+            {isAdmin && (
+              <>
+                <SearchableSelect
+                  disabled={busy}
+                  onValueChange={(v) =>
+                    runBulk({
+                      action: "assign",
+                      value: v === "unassigned" ? null : v,
+                    })
+                  }
+                  options={[
+                    { value: "unassigned", label: "Unassign" },
+                    ...agents.map((a) => ({
+                      value: a.id,
+                      label: a.name ?? a.email,
+                    })),
+                  ]}
+                  placeholder="Assign to…"
+                  searchPlaceholder="Search agents…"
+                  triggerClassName="h-9 w-44"
+                  value=""
+                />
+                <Select
+                  disabled={busy}
+                  onValueChange={(v) => runBulk({ action: "status", value: v })}
+                  value=""
+                >
+                  <SelectTrigger className="h-9 w-44">
+                    <SelectValue placeholder="Change status…" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {statuses.map((s) => (
+                      <SelectItem key={s.slug} value={s.slug}>
+                        {s.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <Select
+                  disabled={busy}
+                  onValueChange={(v) =>
+                    runBulk({ action: "priority", value: v })
+                  }
+                  value=""
+                >
+                  <SelectTrigger className="h-9 w-44">
+                    <SelectValue placeholder="Change priority…" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {priorities.map((p) => (
+                      <SelectItem key={p.slug} value={p.slug}>
+                        {p.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <BulkTagSelect
+                  disabled={busy}
+                  onSelect={(name) => runBulk({ action: "tag", value: name })}
+                />
+              </>
+            )}
+            {canMerge && (
+              <Button
+                className="h-9"
+                disabled={busy || selectedCount < 2}
+                onClick={() => setMergeOpen(true)}
+                size="sm"
+                title={
+                  selectedCount < 2
+                    ? "Select at least 2 tickets to merge"
+                    : undefined
+                }
+                variant="outline"
+              >
+                <GitMergeIcon className="size-4" />
+                Merge
+              </Button>
+            )}
+            {isAdmin && (
+              <Button
+                className="h-9"
+                disabled={busy}
+                onClick={() => setDeleteOpen(true)}
+                size="sm"
+                variant="destructive"
+              >
+                <TrashIcon className="size-4" />
+                Delete
+              </Button>
+            )}
           </div>
         </div>
       )}
@@ -427,7 +476,7 @@ export function TicketsTable({
           <table className="w-full table-fixed text-xs">
             <thead>
               <tr className="sticky top-0 z-10 border-b border-base-300 bg-base-300">
-                {isAdmin && (
+                {canSelect && (
                   <th className="sticky left-0 z-20 w-10 bg-base-300 px-4 py-3">
                     <Checkbox
                       // The primitive's resting border is `base-300`, which is
@@ -495,7 +544,6 @@ export function TicketsTable({
                 <TicketRow
                   agents={agents}
                   categoryMap={categoryMap}
-                  isAdmin={isAdmin}
                   key={row.id}
                   listQuery={listQuery}
                   onRequestClose={(status) =>
@@ -505,6 +553,7 @@ export function TicketsTable({
                   priorities={priorities}
                   priorityMap={priorityMap}
                   row={{ ...row, hasDraft: draftIds.has(row.id) }}
+                  selectable={canSelect}
                   selected={selected.has(row.id)}
                   showSlaAndOverdue={showSlaAndOverdue}
                   statuses={statuses}
@@ -516,6 +565,17 @@ export function TicketsTable({
           </table>
         </div>
       </div>
+
+      {canMerge && (
+        <MergeTicketsDialog
+          baseTickets={rows.filter((r) => selected.has(r.id))}
+          emailsCustomer={mergeEmailsCustomer}
+          onMerged={({ mergedIds }) => handleMerged(mergedIds)}
+          onOpenChange={setMergeOpen}
+          open={mergeOpen}
+          statuses={statuses}
+        />
+      )}
 
       {/* Bulk delete confirmation */}
       <Dialog onOpenChange={setDeleteOpen} open={deleteOpen}>

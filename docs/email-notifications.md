@@ -67,6 +67,12 @@ when a customer replies — agents do not receive email. See [in-app-notificatio
 
 **To:** Customer email (same customer on both tickets — merges are same-customer only)
 **Subject:** `[#1043] Your ticket has been merged into #1042 — {target subject}`
+(several at once: `[#1042] Your tickets #1043, #1044 and #1045 have been merged into #1042 — …`)
+
+One email per merge, however many tickets it folds in — the body lists each merged ticket.
+In a custom template, `{{mergedTicketNumber}}` then renders as `1043, #1044` (so
+`#{{mergedTicketNumber}}` reads `#1043, #1044`) and `{{mergedTicketSubject}}` joins the
+subjects with `; `.
 
 **Content:**
 - Ticket #1043 (and its subject) was about the same request as #1042, so they were combined.
@@ -76,7 +82,7 @@ when a customer replies — agents do not receive email. See [in-app-notificatio
 
 Template: `lib/email/templates/ticket-merged.tsx`, editable as **Ticket Merged** under
 `/admin/email-templates` (merge tags: `mergedTicketNumber`, `mergedTicketSubject`,
-`ticketNumber`, `ticketSubject`, `ticketUrl`, `customerName`). Sent from `mergeTickets()`
+`ticketNumber`, `ticketSubject`, `ticketUrl`, `customerName`). Sent from `mergeTicketsInto()`
 (`lib/tickets/merge.ts`) only when **Admin → Ticket Config → Ticket Actions → Merge → Email the
 customer** is on (default on), and — like every ticket email — only while "Docket sends email"
 is on.

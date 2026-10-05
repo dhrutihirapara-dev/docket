@@ -47,13 +47,16 @@ Agents can filter the list by:
 
 Filters are combinable. Active filters are shown as removable chips above the list.
 
-### Bulk Actions (Admin only)
+### Bulk Actions
 
-- Select multiple tickets with checkboxes.
+- Select multiple tickets with checkboxes. Admins get every action below; agents get the
+  checkboxes only for **Merge** (shown only while merging is switched on) — the other
+  actions are admin-only, enforced by `/api/tickets/bulk`.
 - Bulk assign to an agent.
 - Bulk change status.
 - Bulk change priority.
 - Bulk add a tag (search the shared tag pool or create a new one — same freeform pool as the ticket detail page's tag picker).
+- Bulk merge (admins and agents; 2+ tickets from the same customer): pick the primary ticket — it must be open; the oldest open one is preselected — and the rest are merged into it in one all-or-nothing request, with one customer email. Same dialog as the sidebar's Merge Ticket — see [tickets.md § Merge](./tickets.md#merge). Hidden when an admin turns merging off.
 - Bulk delete (spam — admin only).
 
 ---

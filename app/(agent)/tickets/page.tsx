@@ -16,6 +16,7 @@ import { ticketActivity, tickets } from "@/db/schema/tickets";
 import { requireAgent } from "@/lib/authz";
 import { db } from "@/lib/db";
 import { getPageNumbers } from "@/lib/pagination";
+import { getPlatformSettings, getTicketActionSettings } from "@/lib/settings";
 import { computeSlaSnapshot } from "@/lib/sla";
 // import {
 //   getSlaPolicies,
@@ -282,6 +283,7 @@ async function TicketsResults({
       status: tickets.status,
       category: tickets.category,
       priority: tickets.priority,
+      customerId: tickets.customerId,
       customerName: customers.name,
       assignedAgentId: tickets.assignedAgentId,
       assignedAgentName: user.name,
@@ -310,29 +312,37 @@ async function TicketsResults({
   );
   const ticketIds = rows.map((r) => r.id);
 
-  const [tagsByTicket, updatedByRows, draftTicketIds, linkedByTicket] =
-    await Promise.all([
-      visibleColumnIds.has("tags")
-        ? getTicketTagsForTickets(ticketIds)
-        : Promise.resolve({} as Record<string, string[]>),
-      visibleColumnIds.has("updatedBy") && ticketIds.length > 0
-        ? db
-            .selectDistinctOn([ticketActivity.ticketId], {
-              ticketId: ticketActivity.ticketId,
-              actorName: ticketActivity.actorName,
-            })
-            .from(ticketActivity)
-            .where(
-              and(
-                inArray(ticketActivity.ticketId, ticketIds),
-                inArray(ticketActivity.actorRole, [AGENT_ROLE, ADMIN_ROLE])
-              )
+  const [
+    tagsByTicket,
+    updatedByRows,
+    draftTicketIds,
+    linkedByTicket,
+    ticketActions,
+    platformSettings,
+  ] = await Promise.all([
+    visibleColumnIds.has("tags")
+      ? getTicketTagsForTickets(ticketIds)
+      : Promise.resolve({} as Record<string, string[]>),
+    visibleColumnIds.has("updatedBy") && ticketIds.length > 0
+      ? db
+          .selectDistinctOn([ticketActivity.ticketId], {
+            ticketId: ticketActivity.ticketId,
+            actorName: ticketActivity.actorName,
+          })
+          .from(ticketActivity)
+          .where(
+            and(
+              inArray(ticketActivity.ticketId, ticketIds),
+              inArray(ticketActivity.actorRole, [AGENT_ROLE, ADMIN_ROLE])
             )
-            .orderBy(ticketActivity.ticketId, desc(ticketActivity.createdAt))
-        : Promise.resolve([]),
-      getDraftTicketIds(ticketIds, agentId),
-      getLinkedTicketNumbers(ticketIds),
-    ]);
+          )
+          .orderBy(ticketActivity.ticketId, desc(ticketActivity.createdAt))
+      : Promise.resolve([]),
+    getDraftTicketIds(ticketIds, agentId),
+    getLinkedTicketNumbers(ticketIds),
+    getTicketActionSettings(),
+    getPlatformSettings(),
+  ]);
   const updatedByTicket = Object.fromEntries(
     updatedByRows.map((r) => [r.ticketId, r.actorName])
   );
@@ -434,10 +444,15 @@ async function TicketsResults({
         <>
           <TicketsTable
             agents={agents}
+            canMerge={ticketActions.ticketMergeEnabled}
             categoryMap={categoryMap}
             columnPrefs={columnPrefs}
             isAdmin={isAdmin}
             listQuery={listQuery}
+            mergeEmailsCustomer={
+              ticketActions.ticketMergeCustomerEmailEnabled &&
+              platformSettings.ticketEmailNotificationsEnabled
+            }
             priorities={priorities}
             priorityMap={priorityMap}
             rows={rowsWithExtras}

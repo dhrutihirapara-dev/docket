@@ -286,13 +286,26 @@ Each of the three can be turned off (and its notifications separately) under
 [admin-portal.md § Ticket Actions](./admin-portal.md#ticket-actions). The routes then return
 `403` and the UI hides the control; existing links stay visible read-only.
 
-Agent-only actions on the ticket detail page. Logic lives in `lib/tickets/merge.ts`,
+Agent-only actions on the ticket detail page (merge is also in the ticket list's bulk bar). Logic lives in `lib/tickets/merge.ts`,
 `lib/tickets/split.ts` and `lib/tickets/links.ts`.
 
 ### Merge
 
-"Merge into another ticket" (sidebar) folds a duplicate ticket (the **source**) into
-another ticket (the **target**). Rules, all enforced server-side:
+"Merge" folds one or more duplicate tickets (the **sources**) into one **primary**
+ticket (the **target**) — e.g. a customer who opened 3–4 tickets about the same login
+problem. Both entry points open the same dialog (`components/agent/merge-tickets-dialog.tsx`):
+
+- **Ticket sidebar → Merge Ticket:** the current ticket is ticked; the customer's other
+  tickets are listed to tick (open ones first — closed ones can be folded in too).
+- **Ticket list → select 2+ → Merge** (bulk bar): the selected tickets are ticked.
+
+The agent picks the primary (it must be open; the oldest open ticket is preselected), and
+the dialog sends one `POST /api/tickets/merge` with `{ sourceTicketIds, targetTicketNumber }`.
+`mergeTicketsInto()` merges every source **in one transaction — all or nothing** — and
+sends the customer **one** Ticket Merged email listing every merged ticket. Owners get one
+in-app notification each; the audit log and `ticket.merged` webhook still get one entry per
+source, the same shape as a single merge. At most 50 sources per merge. Rules, all enforced
+server-side:
 
 - **Same customer only.** The source's old portal link forwards to the target *with the
   target's token*; across customers that would hand one customer another's thread.
@@ -428,6 +441,7 @@ So a teammate working the *other* ticket can't miss a link, it surfaces in four 
 | POST | `/api/tickets/{id}/comments` | Customer (token) / Agent | Add a comment or internal note |
 | DELETE | `/api/tickets/{id}` | Admin only | Hard delete (spam removal) |
 | POST | `/api/tickets/{id}/merge` | Agent/Admin | Merge this ticket into another (body: `{ targetTicketNumber }`) |
+| POST | `/api/tickets/merge` | Agent/Admin | Merge several tickets into one, all or nothing (body: `{ sourceTicketIds, targetTicketNumber }`; max 50 sources) |
 | POST | `/api/tickets/{id}/split` | Agent/Admin | Split a customer reply into a new ticket (body: `{ commentId, subject }`) |
 | GET / POST | `/api/tickets/{id}/links` | Agent/Admin | List links / add one (body: `{ ticketNumber, type }`) |
 | DELETE | `/api/tickets/{id}/links/{linkId}` | Agent/Admin | Remove a link (from either end) |

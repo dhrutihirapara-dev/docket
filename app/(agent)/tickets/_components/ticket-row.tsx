@@ -63,7 +63,6 @@ interface ColorRow {
 interface Props {
   agents: Agent[];
   categoryMap: Record<string, ColorRow | undefined>;
-  isAdmin: boolean;
   /** Current filter/sort/page query string — appended to this row's ticket
    * link so the detail page's Previous/Next buttons stay within this same
    * filtered result set. */
@@ -73,6 +72,8 @@ interface Props {
   priorities: TicketPriority[];
   priorityMap: Record<string, ColorRow | undefined>;
   row: Row;
+  /** Show the selection checkbox (see TicketsTable's `canSelect`). */
+  selectable: boolean;
   selected: boolean;
   /** The agent's "Show SLA & Overdue" preference — off shows only the
    * waiting time (SlaWaitBadge), not SLA/overdue badges. */
@@ -90,7 +91,7 @@ export function TicketRow({
   statuses,
   priorities,
   agents,
-  isAdmin,
+  selectable,
   selected,
   onRequestClose,
   onToggleSelect,
@@ -319,7 +320,7 @@ export function TicketRow({
         selected ? "bg-primary/5" : ""
       }`}
     >
-      {isAdmin && (
+      {selectable && (
         <td
           className={`sticky left-0 z-10 px-4 py-3 transition-colors group-hover:bg-base-300/40 ${
             selected ? "bg-primary/5" : "bg-base-100"

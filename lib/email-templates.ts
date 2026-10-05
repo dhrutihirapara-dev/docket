@@ -170,7 +170,7 @@ export const EMAIL_TEMPLATE_TYPES: EmailTemplateMeta[] = [
     type: "ticket_merged",
     label: "Ticket Merged",
     description:
-      "Sent to the customer when an agent merges one of their tickets into another.",
+      "Sent to the customer when an agent merges one or more of their tickets into another — one email per merge, listing every merged ticket.",
     defaultSubject:
       "[#{{mergedTicketNumber}}] Your ticket has been merged into #{{ticketNumber}} — {{ticketSubject}}",
     gatedByTicketToggle: true,
@@ -195,11 +195,13 @@ export const EMAIL_TEMPLATE_TYPES: EmailTemplateMeta[] = [
       { tag: "customerName", description: "Customer's name" },
       {
         tag: "mergedTicketNumber",
-        description: "The ticket that was merged away, e.g. 1043",
+        description:
+          "The ticket(s) merged away, e.g. 1043 — or 1043, #1044 when several were merged at once (write it as #{{mergedTicketNumber}})",
       },
       {
         tag: "mergedTicketSubject",
-        description: "Subject of the ticket that was merged away",
+        description:
+          'Subject of the ticket merged away — several are joined with "; "',
       },
       {
         tag: "ticketNumber",

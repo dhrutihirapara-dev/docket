@@ -9,6 +9,17 @@ Anything needing manual work on upgrade is called out under **Upgrade notes**.
 
 ## [Unreleased]
 
+### Added
+
+- **Merge several tickets at once.** The Merge dialog (ticket sidebar, and new in the ticket
+  list's bulk bar for 2+ selected tickets) lets an agent tick any number of the customer's
+  tickets and pick the primary one to keep. Everything merges in one all-or-nothing step,
+  and the customer gets a single **Ticket Merged** email listing every merged ticket. New
+  endpoint: `POST /api/tickets/merge`.
+- **Agents can select tickets in the list to merge them.** Agents now get the row
+  checkboxes, and their bulk bar shows only **Merge**; assign, status, priority, tag and
+  delete stay admin-only.
+
 ## [0.6.0] - 2026-10-05
 
 ### Added

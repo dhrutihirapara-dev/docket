@@ -251,9 +251,15 @@ interface Actor {
   role: string;
 }
 
+type Tx = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
 export type MergeResult =
-  | { ok: true; targetTicketNumber: number }
+  | { ok: true; targetTicketNumber: number; mergedTicketNumbers: number[] }
   | { ok: false; error: string; status: number };
+
+/** Most tickets one merge can fold in — far above any real duplicate set, it
+ * only bounds the single transaction. */
+export const MAX_MERGE_SOURCES = 50;
 
 const mergeColumns = {
   id: tickets.id,
@@ -277,23 +283,50 @@ const mergeColumns = {
   createdAt: tickets.createdAt,
 };
 
-/** Merges `sourceId` into the ticket numbered `targetTicketNumber`. The source
- * is kept — closed and pointing at the target — so its portal link and API id
- * keep working; everything customer-visible moves to the target. Same-customer
- * only, target must be open, irreversible. The customer gets the "Ticket
- * Merged" email unless an admin turned it off (Ticket Config → Ticket Actions). */
-export async function mergeTickets(
+/** Merges `sourceId` into the ticket numbered `targetTicketNumber` — the
+ * single-ticket case of mergeTicketsInto. */
+export function mergeTickets(
   sourceId: string,
   targetTicketNumber: number,
   actor: Actor
 ): Promise<MergeResult> {
-  const [[source], [target]] = await Promise.all([
+  return mergeTicketsInto([sourceId], targetTicketNumber, actor);
+}
+
+/** Merges every ticket in `sourceIds` into the ticket numbered
+ * `targetTicketNumber`, all in one transaction — either every source merges or
+ * none does. Each source is kept — closed and pointing at the target — so its
+ * portal link and API id keep working; everything customer-visible moves to
+ * the target. Same-customer only, target must be open, irreversible. The
+ * customer gets ONE "Ticket Merged" email covering every source unless an
+ * admin turned it off (Ticket Config → Ticket Actions). */
+export async function mergeTicketsInto(
+  sourceIds: string[],
+  targetTicketNumber: number,
+  actor: Actor
+): Promise<MergeResult> {
+  const uniqueSourceIds = [...new Set(sourceIds)];
+  if (uniqueSourceIds.length === 0) {
+    return {
+      ok: false,
+      error: "Choose at least one ticket to merge.",
+      status: 400,
+    };
+  }
+  if (uniqueSourceIds.length > MAX_MERGE_SOURCES) {
+    return {
+      ok: false,
+      error: `At most ${MAX_MERGE_SOURCES} tickets can be merged at once.`,
+      status: 400,
+    };
+  }
+
+  const [sourceRows, [target]] = await Promise.all([
     db
       .select(mergeColumns)
       .from(tickets)
       .innerJoin(customers, eq(tickets.customerId, customers.id))
-      .where(eq(tickets.id, sourceId))
-      .limit(1),
+      .where(inArray(tickets.id, uniqueSourceIds)),
     db
       .select(mergeColumns)
       .from(tickets)
@@ -302,8 +335,15 @@ export async function mergeTickets(
       .limit(1),
   ]);
 
-  if (!source) {
-    return { ok: false, error: "This ticket no longer exists.", status: 404 };
+  if (sourceRows.length !== uniqueSourceIds.length) {
+    return {
+      ok: false,
+      error:
+        uniqueSourceIds.length === 1
+          ? "This ticket no longer exists."
+          : "One of the selected tickets no longer exists. Refresh and try again.",
+      status: 404,
+    };
   }
   if (!target) {
     return {
@@ -312,17 +352,24 @@ export async function mergeTickets(
       status: 404,
     };
   }
-  if (source.id === target.id) {
+  // Oldest first, so the thread notes and the customer email list them in
+  // the order the customer opened them.
+  const sources = sourceRows.sort((a, b) => a.ticketNumber - b.ticketNumber);
+  if (sources.some((s) => s.id === target.id)) {
     return {
       ok: false,
       error: "A ticket can't be merged into itself.",
       status: 400,
     };
   }
-  if (source.mergedIntoTicketId) {
+  const alreadyMerged = sources.find((s) => s.mergedIntoTicketId);
+  if (alreadyMerged) {
     return {
       ok: false,
-      error: "This ticket has already been merged.",
+      error:
+        sources.length === 1
+          ? "This ticket has already been merged."
+          : `Ticket #${alreadyMerged.ticketNumber} has already been merged.`,
       status: 400,
     };
   }
@@ -333,9 +380,9 @@ export async function mergeTickets(
       status: 400,
     };
   }
-  // The source's old portal link forwards to the target with the target's
+  // A source's old portal link forwards to the target with the target's
   // token — across customers that would expose one customer's thread to another.
-  if (source.customerId !== target.customerId) {
+  if (sources.some((s) => s.customerId !== target.customerId)) {
     return {
       ok: false,
       error: "Only tickets from the same customer can be merged.",
@@ -357,9 +404,9 @@ export async function mergeTickets(
       status: 400,
     };
   }
-  // Re-derived from the locked row inside the transaction; this pre-lock
-  // value only seeds it.
-  let sourceStatus = source.status;
+  // Each source's final status, re-derived from its locked row inside the
+  // transaction (for the webhook payload).
+  const sourceStatuses = new Map<string, string>();
 
   const now = new Date();
 
@@ -372,9 +419,9 @@ export async function mergeTickets(
     throw err;
   }
 
-  // The checks above ran outside the transaction. Lock both rows (in id order,
-  // so two opposite merges can't deadlock) and re-check, or two agents merging
-  // A→B and B→A at once would leave the pair pointing at each other.
+  // The checks above ran outside the transaction. Lock every row (in id order,
+  // so two overlapping merges can't deadlock) and re-check, or two agents
+  // merging A→B and B→A at once would leave the pair pointing at each other.
   // NO KEY UPDATE serializes merges/splits without blocking customer replies
   // (their FK check only takes KEY SHARE).
   async function runMerge() {
@@ -391,209 +438,49 @@ export async function mergeTickets(
           createdAt: tickets.createdAt,
         })
         .from(tickets)
-        .where(inArray(tickets.id, [source.id, target.id]))
+        .where(inArray(tickets.id, [target.id, ...uniqueSourceIds]))
         .orderBy(asc(tickets.id))
         .for("no key update");
-      const lockedSource = locked.find((t) => t.id === source.id);
       const lockedTarget = locked.find((t) => t.id === target.id);
       if (
-        !lockedSource ||
         !lockedTarget ||
+        locked.length !== uniqueSourceIds.length + 1 ||
         locked.some((t) => t.mergedIntoTicketId) ||
         isClosed(lockedTarget.status)
       ) {
         throw new ConcurrentTicketChangeError();
       }
-      // Everything stateful below (SLA clocks, status) uses the locked rows,
-      // not the pre-lock reads — a reply may have moved them in between.
-      const sourceWasClosed = isClosed(lockedSource.status);
-      sourceStatus = sourceWasClosed
-        ? lockedSource.status
-        : (closedStatus?.slug ?? "closed");
 
-      // 1. The source's opening message becomes a customer comment on the target,
-      // back-dated so it sorts into the thread where it really happened. Its
-      // ticket-level attachments ride along on that comment.
-      const descriptionCommentId = createId();
-      await tx.insert(ticketComments).values({
-        id: descriptionCommentId,
-        ticketId: target.id,
-        authorName: source.customerName,
-        authorRole: "customer",
-        content: source.description,
-        isInternal: false,
-        createdAt: source.createdAt,
-        updatedAt: now,
-      });
-      await tx
-        .update(ticketAttachments)
-        .set({ ticketId: target.id, commentId: descriptionCommentId })
-        .where(
-          and(
-            eq(ticketAttachments.ticketId, source.id),
-            isNull(ticketAttachments.commentId)
-          )
-        );
-
-      // 2. Move the rest of the thread and its files. Storage keys are opaque
-      // strings — the files themselves don't move.
-      await tx
-        .update(ticketComments)
-        .set({ ticketId: target.id })
-        .where(eq(ticketComments.ticketId, source.id));
-      await tx
-        .update(ticketAttachments)
-        .set({ ticketId: target.id })
-        .where(eq(ticketAttachments.ticketId, source.id));
-
-      // 3. Tags: union. Custom fields: the target's own values win; the source
-      // only fills fields the target left empty.
-      const sourceTags = await tx
-        .select({ tagId: ticketTags.tagId })
-        .from(ticketTags)
-        .where(eq(ticketTags.ticketId, source.id));
-      if (sourceTags.length > 0) {
-        await tx
-          .insert(ticketTags)
-          .values(
-            sourceTags.map((t) => ({
-              id: createId(),
-              ticketId: target.id,
-              tagId: t.tagId,
-              createdAt: now,
-            }))
-          )
-          .onConflictDoNothing();
-      }
-      const sourceFields = await tx
-        .select({
-          fieldId: ticketCustomFieldValues.fieldId,
-          value: ticketCustomFieldValues.value,
-        })
-        .from(ticketCustomFieldValues)
-        .where(eq(ticketCustomFieldValues.ticketId, source.id));
-      if (sourceFields.length > 0) {
-        await tx
-          .insert(ticketCustomFieldValues)
-          .values(
-            sourceFields.map((f) => ({
-              id: createId(),
-              ticketId: target.id,
-              fieldId: f.fieldId,
-              value: f.value,
-              createdAt: now,
-              updatedAt: now,
-            }))
-          )
-          .onConflictDoNothing();
-      }
-
-      // 4. Drafts can't move — the same agent may already have one on the target.
-      await tx
-        .delete(ticketReplyDrafts)
-        .where(eq(ticketReplyDrafts.ticketId, source.id));
-
-      // 5. Links: re-point the source's links at the target, dropping any that
-      // would become a self-link or duplicate an existing one.
-      const sourceLinks = await tx
-        .select()
-        .from(ticketLinks)
-        .where(
-          or(
-            eq(ticketLinks.ticketId, source.id),
-            eq(ticketLinks.linkedTicketId, source.id)
-          )
-        );
-      if (sourceLinks.length > 0) {
-        await tx.delete(ticketLinks).where(
-          inArray(
-            ticketLinks.id,
-            sourceLinks.map((l) => l.id)
-          )
-        );
-        const repointed = sourceLinks
-          .map((l) => ({
-            ...l,
-            id: createId(),
-            ticketId: l.ticketId === source.id ? target.id : l.ticketId,
-            linkedTicketId:
-              l.linkedTicketId === source.id ? target.id : l.linkedTicketId,
-            updatedAt: now,
-          }))
-          .filter((l) => l.ticketId !== l.linkedTicketId);
-        // Drop any that duplicate a link the target already has (or each
-        // other) in either direction — onConflictDoNothing only catches the
-        // exact same direction.
-        const targetLinks = await tx
-          .select({
-            ticketId: ticketLinks.ticketId,
-            linkedTicketId: ticketLinks.linkedTicketId,
-            type: ticketLinks.type,
-          })
-          .from(ticketLinks)
-          .where(
-            or(
-              eq(ticketLinks.ticketId, target.id),
-              eq(ticketLinks.linkedTicketId, target.id)
-            )
-          );
-        const seen = new Set(targetLinks.map(ticketLinkKey));
-        const toInsert = repointed.filter((l) => {
-          const key = ticketLinkKey(l);
-          if (seen.has(key)) {
-            return false;
-          }
-          seen.add(key);
-          return true;
-        });
-        if (toInsert.length > 0) {
-          await tx.insert(ticketLinks).values(toInsert).onConflictDoNothing();
+      for (const source of sources) {
+        const lockedSource = locked.find((t) => t.id === source.id);
+        if (!lockedSource) {
+          throw new ConcurrentTicketChangeError();
         }
+        await mergeOneSource(tx, source, lockedSource);
       }
 
-      // 6. Tickets previously merged into the source now forward straight to the
-      // target, so resolution is always a single hop.
-      await tx
-        .update(tickets)
-        .set({ mergedIntoTicketId: target.id, updatedAt: now })
-        .where(eq(tickets.mergedIntoTicketId, source.id));
-
-      // 7. Close the source and point it at the target.
-      await tx
-        .update(tickets)
-        .set({
-          status: sourceStatus,
-          closedAt: lockedSource.closedAt ?? now,
-          mergedIntoTicketId: target.id,
-          mergedAt: now,
-          awaitingReply: false,
-          pendingReplies: 0,
-          updatedAt: now,
-          ...(sourceWasClosed
-            ? {}
-            : computeSlaTransition(lockedSource, false, now, "closing")),
-        })
-        .where(eq(tickets.id, source.id));
-
-      // 8. The target's thread was rewritten — recompute "awaiting reply".
-      // First response: the target's own; else the source's, but only if it
-      // came after the target existed — an earlier one would put the first
-      // response before the ticket's creation (negative report averages).
+      // The target's thread was rewritten — recompute "awaiting reply".
+      // First response: the target's own; else the earliest source response
+      // that came after the target existed — an earlier one would put the
+      // first response before the ticket's creation (negative report averages).
       await recomputeAwaitingReply(tx, lockedTarget, now);
-      const sourceResponse = lockedSource.firstRespondedAt;
+      const sourceResponses = locked
+        .filter((t) => t.id !== target.id)
+        .map((t) => t.firstRespondedAt)
+        .filter((d): d is Date => d !== null && d >= lockedTarget.createdAt)
+        .sort((a, b) => a.getTime() - b.getTime());
       const firstRespondedAt =
-        lockedTarget.firstRespondedAt ??
-        (sourceResponse && sourceResponse >= lockedTarget.createdAt
-          ? sourceResponse
-          : null);
+        lockedTarget.firstRespondedAt ?? sourceResponses[0] ?? null;
       await tx
         .update(tickets)
         .set({ firstRespondedAt, updatedAt: now })
         .where(eq(tickets.id, target.id));
 
-      // 9. Paper trail: an internal note on the target (keeps the source's
-      // subject, which otherwise only lives on the closed source) and an
-      // activity row on each side.
+      // Paper trail: one internal note on the target (keeps each source's
+      // subject, which otherwise only lives on the closed source).
+      const mergedList = sources
+        .map((s) => `#${s.ticketNumber} ("${s.subject}")`)
+        .join(", ");
       await tx.insert(ticketComments).values({
         id: createId(),
         ticketId: target.id,
@@ -601,53 +488,243 @@ export async function mergeTickets(
         authorName: actor.name,
         authorRole: actor.role,
         content: textToRichTextJson(
-          `Ticket #${source.ticketNumber} ("${source.subject}") was merged into this ticket. Its messages and attachments now appear here.`
+          sources.length === 1
+            ? `Ticket ${mergedList} was merged into this ticket. Its messages and attachments now appear here.`
+            : `Tickets ${mergedList} were merged into this ticket. Their messages and attachments now appear here.`
         ),
         isInternal: true,
         createdAt: now,
         updatedAt: now,
       });
-      await tx.insert(ticketActivity).values([
-        {
-          id: createId(),
-          ticketId: source.id,
-          actorId: actor.id,
-          actorName: actor.name,
-          actorRole: actor.role,
-          action: "merged_into",
-          metadata: { ticketNumber: target.ticketNumber },
-          createdAt: now,
-        },
-        {
-          id: createId(),
-          ticketId: target.id,
-          actorId: actor.id,
-          actorName: actor.name,
-          actorRole: actor.role,
-          action: "merged_from",
-          metadata: { ticketNumber: source.ticketNumber },
-          createdAt: now,
-        },
-      ]);
     });
   }
 
+  /** Steps 1–7 for one source, inside the shared transaction. Each step reads
+   * the current (in-transaction) state, so a later source sees the links and
+   * tags an earlier one already moved onto the target. */
+  async function mergeOneSource(
+    tx: Tx,
+    source: (typeof sources)[number],
+    lockedSource: {
+      status: string;
+      closedAt: Date | null;
+      awaitingReply: boolean;
+      waitingSince: Date | null;
+      createdAt: Date;
+    }
+  ) {
+    // Everything stateful below (SLA clocks, status) uses the locked row,
+    // not the pre-lock read — a reply may have moved it in between.
+    const sourceWasClosed = isClosed(lockedSource.status);
+    const sourceStatus = sourceWasClosed
+      ? lockedSource.status
+      : (closedStatus?.slug ?? "closed");
+    sourceStatuses.set(source.id, sourceStatus);
+
+    // 1. The source's opening message becomes a customer comment on the target,
+    // back-dated so it sorts into the thread where it really happened. Its
+    // ticket-level attachments ride along on that comment.
+    const descriptionCommentId = createId();
+    await tx.insert(ticketComments).values({
+      id: descriptionCommentId,
+      ticketId: target.id,
+      authorName: source.customerName,
+      authorRole: "customer",
+      content: source.description,
+      isInternal: false,
+      createdAt: source.createdAt,
+      updatedAt: now,
+    });
+    await tx
+      .update(ticketAttachments)
+      .set({ ticketId: target.id, commentId: descriptionCommentId })
+      .where(
+        and(
+          eq(ticketAttachments.ticketId, source.id),
+          isNull(ticketAttachments.commentId)
+        )
+      );
+
+    // 2. Move the rest of the thread and its files. Storage keys are opaque
+    // strings — the files themselves don't move.
+    await tx
+      .update(ticketComments)
+      .set({ ticketId: target.id })
+      .where(eq(ticketComments.ticketId, source.id));
+    await tx
+      .update(ticketAttachments)
+      .set({ ticketId: target.id })
+      .where(eq(ticketAttachments.ticketId, source.id));
+
+    // 3. Tags: union. Custom fields: the target's own values win; a source
+    // only fills fields still empty (the oldest source first).
+    const sourceTags = await tx
+      .select({ tagId: ticketTags.tagId })
+      .from(ticketTags)
+      .where(eq(ticketTags.ticketId, source.id));
+    if (sourceTags.length > 0) {
+      await tx
+        .insert(ticketTags)
+        .values(
+          sourceTags.map((t) => ({
+            id: createId(),
+            ticketId: target.id,
+            tagId: t.tagId,
+            createdAt: now,
+          }))
+        )
+        .onConflictDoNothing();
+    }
+    const sourceFields = await tx
+      .select({
+        fieldId: ticketCustomFieldValues.fieldId,
+        value: ticketCustomFieldValues.value,
+      })
+      .from(ticketCustomFieldValues)
+      .where(eq(ticketCustomFieldValues.ticketId, source.id));
+    if (sourceFields.length > 0) {
+      await tx
+        .insert(ticketCustomFieldValues)
+        .values(
+          sourceFields.map((f) => ({
+            id: createId(),
+            ticketId: target.id,
+            fieldId: f.fieldId,
+            value: f.value,
+            createdAt: now,
+            updatedAt: now,
+          }))
+        )
+        .onConflictDoNothing();
+    }
+
+    // 4. Drafts can't move — the same agent may already have one on the target.
+    await tx
+      .delete(ticketReplyDrafts)
+      .where(eq(ticketReplyDrafts.ticketId, source.id));
+
+    // 5. Links: re-point the source's links at the target, dropping any that
+    // would become a self-link (incl. a link between two merged sources) or
+    // duplicate an existing one.
+    const sourceLinks = await tx
+      .select()
+      .from(ticketLinks)
+      .where(
+        or(
+          eq(ticketLinks.ticketId, source.id),
+          eq(ticketLinks.linkedTicketId, source.id)
+        )
+      );
+    if (sourceLinks.length > 0) {
+      await tx.delete(ticketLinks).where(
+        inArray(
+          ticketLinks.id,
+          sourceLinks.map((l) => l.id)
+        )
+      );
+      const repointed = sourceLinks
+        .map((l) => ({
+          ...l,
+          id: createId(),
+          ticketId: l.ticketId === source.id ? target.id : l.ticketId,
+          linkedTicketId:
+            l.linkedTicketId === source.id ? target.id : l.linkedTicketId,
+          updatedAt: now,
+        }))
+        .filter((l) => l.ticketId !== l.linkedTicketId);
+      // Drop any that duplicate a link the target already has (or each
+      // other) in either direction — onConflictDoNothing only catches the
+      // exact same direction.
+      const targetLinks = await tx
+        .select({
+          ticketId: ticketLinks.ticketId,
+          linkedTicketId: ticketLinks.linkedTicketId,
+          type: ticketLinks.type,
+        })
+        .from(ticketLinks)
+        .where(
+          or(
+            eq(ticketLinks.ticketId, target.id),
+            eq(ticketLinks.linkedTicketId, target.id)
+          )
+        );
+      const seen = new Set(targetLinks.map(ticketLinkKey));
+      const toInsert = repointed.filter((l) => {
+        const key = ticketLinkKey(l);
+        if (seen.has(key)) {
+          return false;
+        }
+        seen.add(key);
+        return true;
+      });
+      if (toInsert.length > 0) {
+        await tx.insert(ticketLinks).values(toInsert).onConflictDoNothing();
+      }
+    }
+
+    // 6. Tickets previously merged into the source now forward straight to the
+    // target, so resolution is always a single hop.
+    await tx
+      .update(tickets)
+      .set({ mergedIntoTicketId: target.id, updatedAt: now })
+      .where(eq(tickets.mergedIntoTicketId, source.id));
+
+    // 7. Close the source and point it at the target.
+    await tx
+      .update(tickets)
+      .set({
+        status: sourceStatus,
+        closedAt: lockedSource.closedAt ?? now,
+        mergedIntoTicketId: target.id,
+        mergedAt: now,
+        awaitingReply: false,
+        pendingReplies: 0,
+        updatedAt: now,
+        ...(sourceWasClosed
+          ? {}
+          : computeSlaTransition(lockedSource, false, now, "closing")),
+      })
+      .where(eq(tickets.id, source.id));
+
+    await tx.insert(ticketActivity).values([
+      {
+        id: createId(),
+        ticketId: source.id,
+        actorId: actor.id,
+        actorName: actor.name,
+        actorRole: actor.role,
+        action: "merged_into",
+        metadata: { ticketNumber: target.ticketNumber },
+        createdAt: now,
+      },
+      {
+        id: createId(),
+        ticketId: target.id,
+        actorId: actor.id,
+        actorName: actor.name,
+        actorRole: actor.role,
+        action: "merged_from",
+        metadata: { ticketNumber: source.ticketNumber },
+        createdAt: now,
+      },
+    ]);
+  }
+
   // Side effects, best effort — the merge itself is committed. Refresh anyone
-  // viewing either ticket or the list (no-op without Pusher Channels).
+  // viewing any of the tickets or the list (no-op without Pusher Channels).
   await Promise.all([
-    publishTicketCommentCreated(source.id),
+    ...sources.map((s) => publishTicketCommentCreated(s.id)),
     publishTicketCommentCreated(target.id),
     publishTicketCreated(),
   ]).catch((err) => console.error("[realtime.ticket_merged]", err));
 
-  // Tell both owners: the source's owner sees their ticket vanish from the
-  // list, the target's owner gets new messages in theirs. Both notifications
-  // open the target — the source only redirects there anyway.
   const actionSettings = await getTicketActionSettings();
+  const sourceNumbers = sources.map((s) => `#${s.ticketNumber}`).join(", ");
 
-  // Tell the customer where the conversation continues. Same-customer only, so
-  // the target's link (and token) is theirs. enqueueEmail drops it when the
-  // admin turned ticket emails off altogether.
+  // Tell the customer where the conversation continues — one email for the
+  // whole merge, not one per source. Same-customer only, so the target's link
+  // (and token) is theirs. enqueueEmail drops it when the admin turned ticket
+  // emails off altogether.
   if (actionSettings.ticketMergeCustomerEmailEnabled) {
     const ticketUrl = await resolveTicketPortalUrl(
       target.id,
@@ -656,8 +733,10 @@ export async function mergeTickets(
     );
     await ticketMergedTemplate({
       customerName: target.customerName,
-      mergedTicketNumber: source.ticketNumber,
-      mergedTicketSubject: source.subject,
+      mergedTickets: sources.map((s) => ({
+        ticketNumber: s.ticketNumber,
+        subject: s.subject,
+      })),
       ticketNumber: target.ticketNumber,
       ticketSubject: target.subject,
       ticketUrl,
@@ -674,24 +753,29 @@ export async function mergeTickets(
       .catch((err) => console.error("[ticket.merged email]", err));
   }
 
+  // Tell the owners: the sources' owners see their tickets vanish from the
+  // list, the target's owner gets new messages in theirs. Each person gets
+  // one notification (routeOwnerRecipients dedupes across tickets); all of
+  // them open the target — the sources only redirect there anyway.
   if (actionSettings.ticketMergeNotificationsEnabled) {
+    const title = `${actor.name} merged ${sourceNumbers} into #${target.ticketNumber}`;
     await ticketOwnerRecipients(
-      [source.assignedAgentId, target.assignedAgentId],
+      [target.assignedAgentId, ...sources.map((s) => s.assignedAgentId)],
       actor.id
     )
-      .then(([sourceRecipients, targetRecipients]) =>
+      .then(([targetRecipients, ...sourceRecipients]) =>
         Promise.all([
-          createNotifications(sourceRecipients, {
+          createNotifications(targetRecipients, {
             type: "ticket_merged",
-            title: `${actor.name} merged #${source.ticketNumber} into #${target.ticketNumber}`,
-            body: `#${source.ticketNumber} "${source.subject}" is closed; its messages now continue in #${target.ticketNumber} "${target.subject}".`,
+            title,
+            body: `Messages and attachments from ${sourceNumbers} were added to #${target.ticketNumber}.`,
             ticketId: target.id,
             ticketNumber: target.ticketNumber,
           }),
-          createNotifications(targetRecipients, {
+          createNotifications(sourceRecipients.flat(), {
             type: "ticket_merged",
-            title: `${actor.name} merged #${source.ticketNumber} into #${target.ticketNumber}`,
-            body: `Messages and attachments from #${source.ticketNumber} "${source.subject}" were added to #${target.ticketNumber}.`,
+            title,
+            body: `${sourceNumbers} ${sources.length === 1 ? "is" : "are"} closed; the conversation now continues in #${target.ticketNumber} "${target.subject}".`,
             ticketId: target.id,
             ticketNumber: target.ticketNumber,
           }),
@@ -700,32 +784,39 @@ export async function mergeTickets(
       .catch((err) => console.error("[notification.ticket_merged]", err));
   }
 
-  // Irreversible, so it also goes in the admin audit log.
-  await audit({
-    action: "ticket.merged",
-    actorEmail: actor.email,
-    actorId: actor.id,
-    description: `Merged ticket #${source.ticketNumber} into #${target.ticketNumber}`,
-    entityId: target.id,
-    entityType: "ticket",
-    metadata: {
-      sourceTicketId: source.id,
-      sourceTicketNumber: source.ticketNumber,
-      targetTicketNumber: target.ticketNumber,
-    },
-  }).catch((err) => console.error("[audit.ticket_merged]", err));
+  // Per source, so the audit log and integrators see the same one-ticket
+  // record whether it was merged alone or alongside others. Irreversible, so
+  // it goes in the admin audit log. Only ticket.merged — not also
+  // ticket.closed for the source, since integrators commonly email the
+  // customer on ticket.closed, and the merge has its own customer email.
+  for (const source of sources) {
+    await audit({
+      action: "ticket.merged",
+      actorEmail: actor.email,
+      actorId: actor.id,
+      description: `Merged ticket #${source.ticketNumber} into #${target.ticketNumber}`,
+      entityId: target.id,
+      entityType: "ticket",
+      metadata: {
+        sourceTicketId: source.id,
+        sourceTicketNumber: source.ticketNumber,
+        targetTicketNumber: target.ticketNumber,
+      },
+    }).catch((err) => console.error("[audit.ticket_merged]", err));
 
-  // Only ticket.merged — not also ticket.closed for the source, since
-  // integrators commonly email the customer on ticket.closed, and the merge
-  // has its own customer email (above) when the admin wants one.
-  await dispatchWebhookEvent("ticket.merged", "ticket", target.id, {
-    ticket: ticketPayloadData({ ...target, updatedAt: now }),
-    mergedTicket: ticketPayloadData({
-      ...source,
-      status: sourceStatus,
-      updatedAt: now,
-    }),
-  }).catch((err) => console.error("[webhook.ticket_merged]", err));
+    await dispatchWebhookEvent("ticket.merged", "ticket", target.id, {
+      ticket: ticketPayloadData({ ...target, updatedAt: now }),
+      mergedTicket: ticketPayloadData({
+        ...source,
+        status: sourceStatuses.get(source.id) ?? source.status,
+        updatedAt: now,
+      }),
+    }).catch((err) => console.error("[webhook.ticket_merged]", err));
+  }
 
-  return { ok: true, targetTicketNumber: target.ticketNumber };
+  return {
+    ok: true,
+    targetTicketNumber: target.ticketNumber,
+    mergedTicketNumbers: sources.map((s) => s.ticketNumber),
+  };
 }

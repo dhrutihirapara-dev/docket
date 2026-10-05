@@ -9,6 +9,7 @@ import {
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { toast } from "sonner";
+import { MergeTicketsDialog } from "@/components/agent/merge-tickets-dialog";
 import { SearchableSelect } from "@/components/common/searchable-select";
 import {
   SlaMetricBadge,
@@ -47,7 +48,6 @@ import { type TicketLinkType, ticketLinkLabel } from "@/lib/tickets/link-types";
 import type { TicketLinkView } from "@/lib/tickets/links";
 import { getInitials } from "@/lib/utils";
 import { CustomerProfilePopover } from "./customer-profile-popover";
-import { MergeTicketDialog } from "./merge-ticket-dialog";
 import { SidebarCard } from "./sidebar-card";
 import { TicketCustomFields } from "./ticket-custom-fields";
 import { TicketLinks } from "./ticket-links";
@@ -709,12 +709,22 @@ export function TicketInfoSidebar({
         </DialogContent>
       </Dialog>
 
-      <MergeTicketDialog
+      <MergeTicketsDialog
+        baseTickets={[ticket]}
+        customerId={ticket.customerId}
         emailsCustomer={mergeEmailsCustomer}
+        onMerged={({ mergedIds, targetTicketNumber }) => {
+          // This ticket was folded into another: it's now a closed shell that
+          // redirects, so go to the survivor. Otherwise this IS the survivor.
+          if (mergedIds.includes(ticket.id)) {
+            router.push(`/tickets/${targetTicketNumber}`);
+          } else {
+            router.refresh();
+          }
+        }}
         onOpenChange={setMergeOpen}
         open={mergeOpen}
         statuses={statuses}
-        ticket={ticket}
       />
 
       {/* Delete Ticket dialog */}
