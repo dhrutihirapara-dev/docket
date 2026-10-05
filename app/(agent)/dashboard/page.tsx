@@ -107,7 +107,12 @@ export default async function DashboardPage() {
           >`EXTRACT(EPOCH FROM AVG(NOW() - ${tickets.createdAt}))`,
         })
         .from(tickets)
-        .where(inArray(tickets.status, nonClosedSlugs))
+        .where(
+          and(
+            inArray(tickets.status, nonClosedSlugs),
+            isNull(tickets.mergedIntoTicketId)
+          )
+        )
     : [{ avgWaitSeconds: null }];
 
   const stats = {
@@ -132,7 +137,12 @@ export default async function DashboardPage() {
       count: count(),
     })
     .from(tickets)
-    .where(gte(tickets.createdAt, sevenDaysAgo))
+    .where(
+      and(
+        gte(tickets.createdAt, sevenDaysAgo),
+        isNull(tickets.mergedIntoTicketId)
+      )
+    )
     .groupBy(sql`DATE(${tickets.createdAt})`)
     .orderBy(sql`DATE(${tickets.createdAt})`);
 
@@ -158,7 +168,10 @@ export default async function DashboardPage() {
     .leftJoin(user, eq(tickets.assignedAgentId, user.id))
     .where(
       nonClosedSlugs.length
-        ? inArray(tickets.status, nonClosedSlugs)
+        ? and(
+            inArray(tickets.status, nonClosedSlugs),
+            isNull(tickets.mergedIntoTicketId)
+          )
         : sql`false`
     )
     .orderBy(desc(tickets.updatedAt))
@@ -178,6 +191,7 @@ export default async function DashboardPage() {
     .where(
       and(
         eq(tickets.assignedAgentId, session.user.id),
+        isNull(tickets.mergedIntoTicketId),
         nonClosedSlugs.length
           ? inArray(tickets.status, nonClosedSlugs)
           : sql`false`

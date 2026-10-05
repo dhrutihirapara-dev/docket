@@ -1,5 +1,5 @@
 import { createId } from "@paralleldrive/cuid2";
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { customers, ticketActivity, tickets } from "@/db/schema";
@@ -8,7 +8,7 @@ import { db } from "@/lib/db";
 import { checkRateLimit, getClientIp } from "@/lib/rate-limit";
 import { computeSlaTransition } from "@/lib/sla";
 import { getDefaultStatus, isClosedStatusSlug } from "@/lib/ticket-config";
-import { forwardMergedTicket } from "@/lib/tickets/merge";
+import { MERGED_TICKET_CHANGE_MESSAGE } from "@/lib/tickets/merge";
 import { notifyTicketStatusChange } from "@/lib/tickets/notify-status-change";
 
 export async function PATCH(
@@ -25,10 +25,9 @@ export async function PATCH(
     // no body is fine
   }
 
-  // A merged ticket forwards to the ticket it was merged into (lib/tickets/merge.ts).
-  const forwarded = await forwardMergedTicket(requestedTicketId, body.token);
-  const ticketId = forwarded.ticketId;
-  body.token = forwarded.token;
+  // Not forwarded when merged — answered with a 409 below, once the caller is
+  // authorized (see MERGED_TICKET_CHANGE_MESSAGE in lib/tickets/merge.ts).
+  const ticketId = requestedTicketId;
 
   const now = new Date();
 
@@ -82,6 +81,12 @@ export async function PATCH(
 
   if (!ticket) {
     return NextResponse.json({ error: "Ticket not found." }, { status: 404 });
+  }
+  if (ticket.mergedIntoTicketId) {
+    return NextResponse.json(
+      { error: MERGED_TICKET_CHANGE_MESSAGE },
+      { status: 409 }
+    );
   }
 
   const [customer] = await db
@@ -137,7 +142,7 @@ export async function PATCH(
       pendingReplies: reopenedByCustomer ? 1 : 0,
       ...slaUpdate,
     })
-    .where(eq(tickets.id, ticketId));
+    .where(and(eq(tickets.id, ticketId), isNull(tickets.mergedIntoTicketId)));
 
   await db.insert(ticketActivity).values({
     id: createId(),

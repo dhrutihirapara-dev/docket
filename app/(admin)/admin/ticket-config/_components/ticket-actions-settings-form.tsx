@@ -65,7 +65,7 @@ const ACTIONS: Array<{
         key: "ticketSplitNotificationsEnabled",
         label: NOTIFY_LABEL,
         description:
-          "Tell the original ticket's owner, and ping agents about the new ticket.",
+          "Tell the original ticket's owner that a reply was split out. Agents are always notified about the new ticket, like any other new ticket.",
       },
     ],
   },

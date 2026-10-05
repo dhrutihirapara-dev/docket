@@ -8,6 +8,7 @@ import {
 } from "@/lib/notifications";
 import { getTicketActionSettings } from "@/lib/settings";
 import { type TicketLinkType, ticketLinkLabel } from "@/lib/tickets/link-types";
+import { CONCURRENT_CHANGE_MESSAGE } from "@/lib/tickets/thread-state";
 
 export interface TicketLinkView {
   /** Who added the link — null if that user has since been deleted. */
@@ -172,58 +173,81 @@ export async function addTicketLink(
 
   // One link per pair and type, in either direction: the reverse of
   // related_to is the same link, and reverse duplicate_of / blocks would be a
-  // contradiction (A blocks B and B blocks A).
-  const [existing] = await db
-    .select({ id: ticketLinks.id })
-    .from(ticketLinks)
-    .where(
-      and(
-        eq(ticketLinks.type, type),
-        or(
+  // contradiction (A blocks B and B blocks A). The unique index only covers
+  // one direction, so the check runs under a lock on both tickets (in id
+  // order, like merge/split — no deadlocks): two agents linking A→B and B→A
+  // at once serialize, and a merge landing meanwhile is seen here instead of
+  // leaving a link on the hidden merged ticket.
+  const now = new Date();
+  const conflict = await db.transaction(
+    async (tx): Promise<LinkResult | null> => {
+      const locked = await tx
+        .select({
+          id: tickets.id,
+          mergedIntoTicketId: tickets.mergedIntoTicketId,
+        })
+        .from(tickets)
+        .where(inArray(tickets.id, [source.id, target.id]))
+        .orderBy(asc(tickets.id))
+        .for("no key update");
+      if (locked.length !== 2 || locked.some((t) => t.mergedIntoTicketId)) {
+        return { ok: false, error: CONCURRENT_CHANGE_MESSAGE, status: 409 };
+      }
+
+      const [existing] = await tx
+        .select({ id: ticketLinks.id })
+        .from(ticketLinks)
+        .where(
           and(
-            eq(ticketLinks.ticketId, source.id),
-            eq(ticketLinks.linkedTicketId, target.id)
-          ),
-          and(
-            eq(ticketLinks.ticketId, target.id),
-            eq(ticketLinks.linkedTicketId, source.id)
+            eq(ticketLinks.type, type),
+            or(
+              and(
+                eq(ticketLinks.ticketId, source.id),
+                eq(ticketLinks.linkedTicketId, target.id)
+              ),
+              and(
+                eq(ticketLinks.ticketId, target.id),
+                eq(ticketLinks.linkedTicketId, source.id)
+              )
+            )
           )
         )
-      )
-    )
-    .limit(1);
-  if (existing) {
-    return {
-      ok: false,
-      error: "These tickets are already linked.",
-      status: 409,
-    };
-  }
+        .limit(1);
+      if (existing) {
+        return {
+          ok: false,
+          error: "These tickets are already linked.",
+          status: 409,
+        };
+      }
 
-  const now = new Date();
-  await db.transaction(async (tx) => {
-    await tx.insert(ticketLinks).values({
-      id: createId(),
-      ticketId: source.id,
-      linkedTicketId: target.id,
-      type,
-      createdById: actor.id,
-      createdAt: now,
-      updatedAt: now,
-    });
-    await tx.insert(ticketActivity).values([
-      linkActivity(source.id, "ticket_linked", actor, now, {
+      await tx.insert(ticketLinks).values({
+        id: createId(),
+        ticketId: source.id,
+        linkedTicketId: target.id,
         type,
-        direction: "outgoing",
-        ticketNumber: target.ticketNumber,
-      }),
-      linkActivity(target.id, "ticket_linked", actor, now, {
-        type,
-        direction: "incoming",
-        ticketNumber: source.ticketNumber,
-      }),
-    ]);
-  });
+        createdById: actor.id,
+        createdAt: now,
+        updatedAt: now,
+      });
+      await tx.insert(ticketActivity).values([
+        linkActivity(source.id, "ticket_linked", actor, now, {
+          type,
+          direction: "outgoing",
+          ticketNumber: target.ticketNumber,
+        }),
+        linkActivity(target.id, "ticket_linked", actor, now, {
+          type,
+          direction: "incoming",
+          ticketNumber: source.ticketNumber,
+        }),
+      ]);
+      return null;
+    }
+  );
+  if (conflict) {
+    return conflict;
+  }
 
   if ((await getTicketActionSettings()).ticketLinkNotificationsEnabled) {
     await notifyTicketLinked(source, target, type, actor).catch((err) =>

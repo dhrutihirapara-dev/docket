@@ -6,7 +6,7 @@ import { ticketReplyDrafts, tickets } from "@/db/schema";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { isRichTextEmpty } from "@/lib/rich-text";
-import { resolveMergedTicketId } from "@/lib/tickets/merge";
+import { MERGED_TICKET_CHANGE_MESSAGE } from "@/lib/tickets/merge";
 import { deleteReplyDraft } from "@/lib/tickets/reply-drafts";
 
 // Generous ceiling for a Tiptap JSON reply — only here to stop the autosave
@@ -27,6 +27,26 @@ async function requireAgentSession(request: NextRequest) {
   return session;
 }
 
+// Drafts on a merged ticket are NOT forwarded: the agent may already have a
+// draft on the surviving ticket, and a stale tab's autosave (or Discard) would
+// silently overwrite or delete it. The merge already deleted this ticket's
+// drafts; the composer stops autosaving on this 409.
+async function isMergedTicket(ticketId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ mergedIntoTicketId: tickets.mergedIntoTicketId })
+    .from(tickets)
+    .where(eq(tickets.id, ticketId))
+    .limit(1);
+  return Boolean(row?.mergedIntoTicketId);
+}
+
+function mergedResponse() {
+  return NextResponse.json(
+    { error: MERGED_TICKET_CHANGE_MESSAGE },
+    { status: 409 }
+  );
+}
+
 // PUT — upsert the caller's own reply draft for this ticket. An empty draft
 // deletes the row instead, so clearing the composer also clears the list's
 // "Draft" marker.
@@ -38,9 +58,10 @@ export async function PUT(
   if (!session) {
     return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
-  const { id: requestedTicketId } = await params;
-  // A merged ticket forwards to the ticket it was merged into (lib/tickets/merge.ts).
-  const ticketId = await resolveMergedTicketId(requestedTicketId);
+  const { id: ticketId } = await params;
+  if (await isMergedTicket(ticketId)) {
+    return mergedResponse();
+  }
 
   let body: { content?: unknown; isInternal?: unknown };
   try {
@@ -102,9 +123,10 @@ export async function DELETE(
   if (!session) {
     return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
-  const { id: requestedTicketId } = await params;
-  // A merged ticket forwards to the ticket it was merged into (lib/tickets/merge.ts).
-  const ticketId = await resolveMergedTicketId(requestedTicketId);
+  const { id: ticketId } = await params;
+  if (await isMergedTicket(ticketId)) {
+    return mergedResponse();
+  }
   await deleteReplyDraft(ticketId, session.user.id);
   return NextResponse.json({ draft: null });
 }

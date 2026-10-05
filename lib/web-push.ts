@@ -1,6 +1,6 @@
 import { createECDH } from "node:crypto";
 import { createId } from "@paralleldrive/cuid2";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, or } from "drizzle-orm";
 import webpush from "web-push";
 import { pushSubscriptions } from "@/db/schema/push-subscriptions";
 import { db } from "@/lib/db";
@@ -23,6 +23,35 @@ export interface WebPushPayload {
 // (unsubscribed, expired, or the browser profile was deleted).
 const GONE_STATUS_CODES = new Set([404, 410]);
 
+// Browser push services. A subscription endpoint is client-supplied and the
+// server later POSTs to it, so anything else is refused — otherwise any agent
+// could point the server at internal hosts (SSRF). Matched as the host itself
+// or any subdomain of it.
+const PUSH_SERVICE_HOSTS = [
+  "fcm.googleapis.com", // Chrome, Edge (Chromium), Opera, Samsung Internet
+  "android.googleapis.com", // legacy GCM endpoints
+  "push.services.mozilla.com", // Firefox
+  "push.apple.com", // Safari (web.push.apple.com)
+  "notify.windows.com", // legacy Edge / WNS
+];
+
+/** True for an https URL on a known browser push service (default port). */
+export function isAllowedPushEndpoint(endpoint: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "https:" || url.port !== "" || url.username) {
+    return false;
+  }
+  const host = url.hostname.toLowerCase();
+  return PUSH_SERVICE_HOSTS.some(
+    (allowed) => host === allowed || host.endsWith(`.${allowed}`)
+  );
+}
+
 export function generateVapidKeys(): { privateKey: string; publicKey: string } {
   return webpush.generateVAPIDKeys();
 }
@@ -40,10 +69,13 @@ export async function sendWebPushToUsers(
     return { attempted: 0, delivered: 0 };
   }
 
-  const subs = await db
-    .select()
-    .from(pushSubscriptions)
-    .where(inArray(pushSubscriptions.userId, userIds));
+  // Re-checked at send time too, in case a row predates the endpoint check.
+  const subs = (
+    await db
+      .select()
+      .from(pushSubscriptions)
+      .where(inArray(pushSubscriptions.userId, userIds))
+  ).filter((sub) => isAllowedPushEndpoint(sub.endpoint));
   if (subs.length === 0) {
     return { attempted: 0, delivered: 0 };
   }
@@ -99,7 +131,10 @@ export async function clearAllWebPushSubscriptions(): Promise<void> {
 }
 
 /** Upserts on `endpoint`: the same browser re-subscribing (e.g. after another
- * agent signs in on it) moves the device to the current user. */
+ * agent signs in on it) moves the device to the current user. A row owned by
+ * someone else is only taken over when the caller also presents its keys —
+ * proof it holds that browser's subscription — so an agent who learned another
+ * agent's endpoint URL can't silently redirect their notifications. */
 export async function saveWebPushSubscription(input: {
   auth: string;
   endpoint: string;
@@ -120,6 +155,13 @@ export async function saveWebPushSubscription(input: {
         userAgent: input.userAgent,
         updatedAt: now,
       },
+      setWhere: or(
+        eq(pushSubscriptions.userId, input.userId),
+        and(
+          eq(pushSubscriptions.p256dh, input.p256dh),
+          eq(pushSubscriptions.auth, input.auth)
+        )
+      ),
     });
 }
 

@@ -320,7 +320,10 @@ export function TicketInfoSidebar({
       toast.success("Ticket reopened.");
       router.refresh();
     } else {
-      toast.error("Failed to reopen ticket.");
+      const data = (await res.json().catch(() => null)) as {
+        error?: string;
+      } | null;
+      toast.error(data?.error ?? "Failed to reopen ticket.");
     }
   }
 

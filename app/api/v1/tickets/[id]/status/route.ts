@@ -1,5 +1,5 @@
 import { createId } from "@paralleldrive/cuid2";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { customers, ticketActivity, tickets } from "@/db/schema";
@@ -14,7 +14,6 @@ import {
   getDefaultStatus,
   isClosedStatusSlug,
 } from "@/lib/ticket-config";
-import { resolveMergedTicketId } from "@/lib/tickets/merge";
 import { notifyTicketStatusChange } from "@/lib/tickets/notify-status-change";
 import { resolveTicketPortalUrl } from "@/lib/tickets/portal-url";
 
@@ -33,9 +32,7 @@ export async function PATCH(
     return e as Response;
   }
 
-  const { id: requestedTicketId } = await params;
-  // A merged ticket forwards to the ticket it was merged into (lib/tickets/merge.ts).
-  const ticketId = await resolveMergedTicketId(requestedTicketId);
+  const { id: ticketId } = await params;
 
   const { allowed } = await checkRateLimit({
     action: "api_ticket_status",
@@ -97,6 +94,16 @@ export async function PATCH(
       { status: 403 }
     );
   }
+  // Not forwarded: an integrator's stored id must not close or reopen the
+  // ticket it was merged into (see lib/tickets/merge.ts).
+  if (ticket.mergedIntoTicketId) {
+    return NextResponse.json(
+      {
+        error: `This ticket was merged into ticket ${ticket.mergedIntoTicketId}, so its status can't be changed. Apply the change to that ticket instead.`,
+      },
+      { status: 409 }
+    );
+  }
 
   const now = new Date();
   const alreadyClosed = await isClosedStatusSlug(ticket.status);
@@ -136,7 +143,7 @@ export async function PATCH(
         pendingReplies: 0,
         ...slaUpdate,
       })
-      .where(eq(tickets.id, ticketId));
+      .where(and(eq(tickets.id, ticketId), isNull(tickets.mergedIntoTicketId)));
 
     await db.insert(ticketActivity).values({
       id: createId(),
@@ -225,7 +232,7 @@ export async function PATCH(
       pendingReplies: 1,
       ...slaUpdate,
     })
-    .where(eq(tickets.id, ticketId));
+    .where(and(eq(tickets.id, ticketId), isNull(tickets.mergedIntoTicketId)));
 
   await db.insert(ticketActivity).values({
     id: createId(),

@@ -141,6 +141,23 @@ export async function getWebPushSettings(): Promise<WebPushSettings | null> {
   return { publicKey, privateKey, subject: vapidSubject() };
 }
 
+/** The public half of the pair getWebPushSettings() would resolve, without
+ * decrypting the private key — the unauthenticated client-config endpoint
+ * needs only this, and must not 500 (taking Pusher Channels config down with
+ * it) if the stored secret can't be decrypted, e.g. after an APP_SECRET
+ * rotation. Same pair-wise rule as getWebPushSettings(). */
+function getWebPushPublicKey(
+  row: Awaited<ReturnType<typeof getRow>>
+): string | null {
+  const dbPublicKey = nonEmpty(row?.webPushVapidPublicKey);
+  if (dbPublicKey && row?.webPushVapidPrivateKeyEncrypted) {
+    return dbPublicKey;
+  }
+  return env.WEB_PUSH_VAPID_PUBLIC_KEY && env.WEB_PUSH_VAPID_PRIVATE_KEY
+    ? env.WEB_PUSH_VAPID_PUBLIC_KEY
+    : null;
+}
+
 export interface PusherChannelsSettings {
   appId: string;
   cluster: string;
@@ -181,9 +198,7 @@ export async function getPusherClientConfig(): Promise<PusherClientConfig> {
   return {
     pushProvider,
     vapidPublicKey:
-      pushProvider === "webpush"
-        ? ((await getWebPushSettings())?.publicKey ?? null)
-        : null,
+      pushProvider === "webpush" ? getWebPushPublicKey(row) : null,
     pusherKey: nonEmpty(row?.pusherKey) ?? env.NEXT_PUBLIC_PUSHER_KEY ?? null,
     pusherCluster:
       nonEmpty(row?.pusherCluster) ?? env.NEXT_PUBLIC_PUSHER_CLUSTER ?? null,

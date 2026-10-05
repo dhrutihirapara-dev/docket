@@ -1,4 +1,4 @@
-import { count, inArray, isNull, sql } from "drizzle-orm";
+import { and, count, inArray, isNull, sql } from "drizzle-orm";
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { tickets } from "@/db/schema";
@@ -47,7 +47,12 @@ export async function GET(_request: NextRequest) {
           >`EXTRACT(EPOCH FROM AVG(NOW() - ${tickets.createdAt}))`,
         })
         .from(tickets)
-        .where(inArray(tickets.status, nonClosedSlugs))
+        .where(
+          and(
+            inArray(tickets.status, nonClosedSlugs),
+            isNull(tickets.mergedIntoTicketId)
+          )
+        )
     : [{ avgWaitSeconds: null }];
 
   return NextResponse.json({

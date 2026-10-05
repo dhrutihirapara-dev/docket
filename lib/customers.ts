@@ -76,7 +76,8 @@ async function getCustomerFrequency(
     .where(
       and(
         eq(tickets.customerId, customerId),
-        gte(tickets.createdAt, rangeStart)
+        gte(tickets.createdAt, rangeStart),
+        isNull(tickets.mergedIntoTicketId)
       )
     )
     .groupBy(monthExpr);

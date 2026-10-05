@@ -241,9 +241,12 @@ admin-configurable, so don't hardcode it.
 ## Merged tickets
 
 When an agent merges a duplicate ticket into another, the merged ticket's id keeps
-working: every `/api/v1/tickets/:id/*` endpoint transparently acts on the ticket it was
-merged into. Reads return that ticket — compare the response's `id` with the one you
-requested to detect a merge — and replies/status changes land on it. Merged tickets
+working for reads and replies: they transparently act on the ticket it was merged into.
+Reads return that ticket — compare the response's `id` with the one you requested to
+detect a merge — and replies land on it. **Status changes are not forwarded:**
+`PATCH /api/v1/tickets/:id/status` on a merged ticket returns `409` with the id of the
+ticket it was merged into, so a stored id can never close or reopen a different
+conversation by accident. Merged tickets
 are left out of `GET /api/v1/tickets?email=`. A reply that races a merge gets a
 `409`; retrying it is safe and applies it to the merged ticket. Attachment URLs keep
 working after a merge or a split (see below).

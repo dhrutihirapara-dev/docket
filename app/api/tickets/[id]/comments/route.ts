@@ -1,5 +1,5 @@
 import { createId } from "@paralleldrive/cuid2";
-import { and, count, eq, or, sql } from "drizzle-orm";
+import { and, count, eq, isNull, or, sql } from "drizzle-orm";
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { ADMIN_ROLE, AGENT_ROLE } from "@/config/platform";
@@ -357,7 +357,7 @@ export async function POST(
         ...slaUpdate,
         ...firstResponseUpdate,
       })
-      .where(eq(tickets.id, ticketId));
+      .where(and(eq(tickets.id, ticketId), isNull(tickets.mergedIntoTicketId)));
 
     await db.insert(ticketActivity).values({
       id: createId(),

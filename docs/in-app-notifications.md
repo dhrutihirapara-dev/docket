@@ -100,7 +100,7 @@ that URL is https, otherwise `mailto:admin@<host>`.
 | Provider dispatch | `lib/push.ts` → `publishPushToUsers()` sends via Beams or `sendWebPushToUsers()` depending on `getPushProvider()`. Call sites never know which one is used |
 | Web Push send / keys | `lib/web-push.ts` contains `sendWebPushToUsers` (prunes 404/410 subscriptions), `generateVapidKeys`, `testWebPushKeys` (format + pair check), and `save`/`deleteWebPushSubscription` |
 | Beams token auth | `app/api/notifications/beams-auth/route.ts` issues a Beams device token, only for the signed-in agent's own id |
-| Web Push subscribe | `POST`/`DELETE /api/notifications/web-push/subscriptions` store or remove the signed-in agent's own subscription. Requests are rejected unless `webpush` is selected |
+| Web Push subscribe | `POST`/`DELETE /api/notifications/web-push/subscriptions` store or remove the signed-in agent's own subscription. Requests are rejected unless `webpush` is selected. The endpoint must be an https URL on a known browser push service (FCM, Mozilla, Apple, WNS — `isAllowedPushEndpoint()`), since the server later POSTs to it; anything else is a `400`. Re-registering an endpoint owned by another agent only moves it when the request carries that subscription's keys |
 | Admin endpoints | `/api/admin/integration-settings/web-push/generate-keys` (returns a pair and saves nothing) and `/web-push/test` |
 | Public config | `GET /api/config/client` returns `pushProvider` plus either `beamsInstanceId` or `vapidPublicKey`, whichever the selected provider needs |
 | Service worker | `public/service-worker.js` serves **both** providers. It imports the Beams SW (which only handles payloads with `data.pusher`) and adds its own `push`/`notificationclick` handlers for Web Push |

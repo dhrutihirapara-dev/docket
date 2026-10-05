@@ -109,6 +109,12 @@ export function AgentReplyForm({
   );
   const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inFlightSaveRef = useRef<Promise<void> | null>(null);
+  // Set while a reply is being sent: autosave and the leave-flush stand down
+  // so they can't re-save text the comments route is about to delete.
+  const submittingRef = useRef(false);
+  // Set once the server answers 409 (ticket merged meanwhile): the draft
+  // route won't accept saves for this ticket any more, so stop retrying.
+  const draftBlockedRef = useRef(false);
   // Latest values for the pagehide/unmount flush, which can't read state.
   const latestRef = useRef({ content, isInternal });
   latestRef.current = { content, isInternal };
@@ -123,7 +129,11 @@ export function AgentReplyForm({
     async function run() {
       const { content: c, isInternal: i } = latestRef.current;
       const key = draftKey(c, i);
-      if (key === lastSavedKeyRef.current) {
+      if (
+        key === lastSavedKeyRef.current ||
+        submittingRef.current ||
+        draftBlockedRef.current
+      ) {
         return;
       }
       setDraftStatus("saving");
@@ -133,6 +143,15 @@ export function AgentReplyForm({
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ content: c, isInternal: i }),
         });
+        if (res.status === 409) {
+          draftBlockedRef.current = true;
+          setDraftStatus("error");
+          const data = (await res.json().catch(() => null)) as {
+            error?: string;
+          } | null;
+          toast.error(data?.error ?? "This draft can no longer be saved.");
+          return;
+        }
         if (!res.ok) {
           throw new Error("save failed");
         }
@@ -176,7 +195,10 @@ export function AgentReplyForm({
   }
 
   useEffect(() => {
-    if (draftKey(content, isInternal) === lastSavedKeyRef.current) {
+    if (
+      draftKey(content, isInternal) === lastSavedKeyRef.current ||
+      submitting
+    ) {
       return;
     }
     saveTimerRef.current = setTimeout(() => {
@@ -189,13 +211,20 @@ export function AgentReplyForm({
         saveTimerRef.current = null;
       }
     };
-  }, [content, isInternal, saveDraft]);
+  }, [content, isInternal, saveDraft, submitting]);
 
   // Flush an unsaved change immediately when the agent leaves — closing the
   // tab (pagehide) or navigating to another page/ticket (unmount). keepalive
   // lets the request outlive the page.
   useEffect(() => {
-    function flush() {
+    // `afterInFlight`: on in-app navigation the page stays alive, so queue
+    // behind a save already on the wire — two concurrent PUTs can land out of
+    // order and leave the older text stored. pagehide can't wait (the page is
+    // being torn down), so it sends immediately.
+    function flush(afterInFlight: boolean) {
+      if (submittingRef.current || draftBlockedRef.current) {
+        return;
+      }
       const { content: c, isInternal: i } = latestRef.current;
       const key = draftKey(c, i);
       if (key === lastSavedKeyRef.current) {
@@ -203,21 +232,30 @@ export function AgentReplyForm({
       }
       lastSavedKeyRef.current = key;
       const body = JSON.stringify({ content: c, isInternal: i });
-      fetch(`/api/tickets/${ticketId}/draft`, {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body,
-        // Over the limit a keepalive request is rejected outright; a plain one
-        // still completes for in-app navigation (the page stays alive).
-        keepalive: new TextEncoder().encode(body).length < KEEPALIVE_BODY_LIMIT,
-      }).catch(() => {
-        // Best effort — the page is going away; nothing left to report to.
-      });
+      const send = () =>
+        fetch(`/api/tickets/${ticketId}/draft`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body,
+          // Over the limit a keepalive request is rejected outright; a plain
+          // one still completes for in-app navigation (the page stays alive).
+          keepalive:
+            new TextEncoder().encode(body).length < KEEPALIVE_BODY_LIMIT,
+        }).catch(() => {
+          // Best effort — the page is going away; nothing left to report to.
+        });
+      const inFlight = inFlightSaveRef.current;
+      if (afterInFlight && inFlight) {
+        inFlight.then(send, send);
+      } else {
+        send();
+      }
     }
-    window.addEventListener("pagehide", flush);
+    const onPageHide = () => flush(false);
+    window.addEventListener("pagehide", onPageHide);
     return () => {
-      window.removeEventListener("pagehide", flush);
-      flush();
+      window.removeEventListener("pagehide", onPageHide);
+      flush(true);
     };
   }, [ticketId]);
 
@@ -228,7 +266,10 @@ export function AgentReplyForm({
       const res = await fetch(`/api/tickets/${ticketId}/draft`, {
         method: "DELETE",
       });
-      if (!res.ok) {
+      if (res.status === 409) {
+        // Ticket merged meanwhile — the merge already deleted this draft.
+        draftBlockedRef.current = true;
+      } else if (!res.ok) {
         throw new Error("discard failed");
       }
     } catch {
@@ -309,6 +350,7 @@ export function AgentReplyForm({
       return;
     }
     setError(null);
+    submittingRef.current = true;
     setSubmitting(true);
     await settleDraftSaves();
     try {
@@ -352,6 +394,7 @@ export function AgentReplyForm({
       setError("Network error. Please try again.");
       toast.error("Network error. Please try again.");
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   }
@@ -460,11 +503,14 @@ export function AgentReplyForm({
             {/* Internal-note toggle */}
             <button
               className={cn(
-                "flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium transition-colors",
+                "flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50",
                 isInternal
                   ? "bg-amber-100 text-amber-800 dark:bg-amber-900/70 dark:text-amber-100"
                   : "text-base-content hover:bg-base-300"
               )}
+              // Disabled while sending: flipping it mid-send would schedule an
+              // autosave that re-creates the draft the send just deleted.
+              disabled={submitting}
               onClick={() => setIsInternal((v) => !v)}
               onMouseDown={(e) => e.preventDefault()}
               title="Toggle internal note — only visible to agents"

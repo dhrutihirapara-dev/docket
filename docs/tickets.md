@@ -322,21 +322,33 @@ What happens, in one transaction:
 9. An internal note on the target records the source's number and subject; `merged_into` /
    `merged_from` activity is written on both.
 
-**Forwarding.** Every request for a merged ticket acts on the target:
+**Forwarding.** Reads and replies for a merged ticket act on the target:
 the customer portal page redirects (`/ticket/{source}?token=…` → `/ticket/{target}?token=…`),
-and the customer/agent comment, close, reopen and PATCH routes plus every
-`/api/v1/tickets/:id/*` route resolve the id first (`forwardMergedTicket()` /
-`resolveMergedTicketId()`). The agent page `/tickets/{sourceNumber}` redirects to the target.
+and the customer/agent comment routes plus the `/api/v1/tickets/:id` read and comment routes
+resolve the id first (`forwardMergedTicket()` / `resolveMergedTicketId()`). The agent page
+`/tickets/{sourceNumber}` redirects to the target.
+
+**State changes are not forwarded.** Close, reopen, the agent `PATCH /api/tickets/{id}`
+(status / category / priority / assignee) and `PATCH /api/v1/tickets/:id/status` answer `409`
+for a merged ticket (`MERGED_TICKET_CHANGE_MESSAGE`). Forwarding them would let a stale tab or
+an integrator's stored id silently close or reassign the *target* — a different conversation
+than the caller meant. Bulk updates skip merged tickets. Reply drafts aren't forwarded either
+(`409`): the agent may already have a draft on the target, and a stale tab's autosave would
+overwrite it; the composer stops autosaving when it sees the `409`.
 Merged tickets are hidden from the agent ticket list, the dashboard counts, reports, the
 customer's "My Tickets" page (and its email), the customer profile popover, and
-`GET /api/v1/tickets?email=`. The agent-only routes (tags, custom fields, drafts, attachment
-delete) forward too, so a tab left open on the merged ticket doesn't write to the hidden shell.
+`GET /api/v1/tickets?email=`. The agent-only tag, custom-field and attachment-delete routes
+forward (merge already combined those into the target), so a tab left open on the merged
+ticket doesn't write to the hidden shell. When an admin deletes a status, category or
+priority, merged tickets don't count as "in use" — they're moved to the target's value (or,
+for status, another closed status) first (`moveMergedTicketsOffSlug()`).
 
 **Concurrency.** Merge and split lock their tickets and re-check inside the transaction; a
 conflicting simultaneous merge/split gets a `409` ("just changed by someone else"). A reply
 saved while a merge is in flight waits for it; if the ticket was merged meanwhile the reply
 is rejected with a `409` asking to resend (its uploads are cleaned up), never stranded on the
-hidden ticket. Deleting a ticket also deletes the tickets merged into it. Merges and splits are also
+hidden ticket. Deleting a ticket also deletes the tickets merged into it, under a row lock so a
+merge into it can't land mid-delete (`deleteTicketsWithMergedShells()`). Merges and splits are also
 recorded in the admin audit log (`ticket.merged` / `ticket.split`).
 
 **First response.** The target keeps its own `firstRespondedAt`; it only inherits the
@@ -352,8 +364,10 @@ marks where it was). The
 new ticket copies category, priority, `source` and `apiKeyId` (so its portal link uses the same
 `portalUrlTemplate`), starts unassigned and awaiting reply, and is linked `related_to` the
 original. The customer receives the normal "ticket created" email with the new link. The
-original's owner gets a `ticket_split` notification; every other active agent gets the usual
-`ticket_created` one (the new ticket is unassigned), plus OS push. Agent
+original's owner gets a `ticket_split` notification (or the plain `ticket_created` one when the
+admin turned split notifications off); every other active agent gets the usual
+`ticket_created` one (the new ticket is unassigned), plus OS push. A reply with only
+attachments gets a short placeholder description. Agent
 replies and internal notes can't be split.
 
 ### Link

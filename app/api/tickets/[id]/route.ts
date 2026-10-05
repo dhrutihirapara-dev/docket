@@ -1,25 +1,23 @@
 import { createId } from "@paralleldrive/cuid2";
-import { eq, inArray } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { ADMIN_ROLE } from "@/config/platform";
-import {
-  customers,
-  ticketActivity,
-  ticketAttachments,
-  tickets,
-} from "@/db/schema";
+import { customers, ticketActivity, tickets } from "@/db/schema";
 import { audit } from "@/lib/audit";
 import { auth } from "@/lib/auth";
 import { db } from "@/lib/db";
-import { storage } from "@/lib/storage";
 import { getTicketTags } from "@/lib/tags";
 import {
   getTicketCategories,
   getTicketPriorities,
   getTicketStatuses,
 } from "@/lib/ticket-config";
-import { resolveMergedTicketId, withMergedShells } from "@/lib/tickets/merge";
+import {
+  deleteTicketsWithMergedShells,
+  MERGED_TICKET_CHANGE_MESSAGE,
+  resolveMergedTicketId,
+} from "@/lib/tickets/merge";
 import { notifyTicketStatusChange } from "@/lib/tickets/notify-status-change";
 import {
   dispatchWebhookEvent,
@@ -89,9 +87,7 @@ export async function PATCH(
     return NextResponse.json({ error: "Unauthorized." }, { status: 401 });
   }
 
-  const { id: requestedTicketId } = await params;
-  // A merged ticket forwards to the ticket it was merged into (lib/tickets/merge.ts).
-  const ticketId = await resolveMergedTicketId(requestedTicketId);
+  const { id: ticketId } = await params;
   let body: {
     status?: string;
     category?: string;
@@ -114,6 +110,13 @@ export async function PATCH(
     .limit(1);
   if (!ticket) {
     return NextResponse.json({ error: "Not found." }, { status: 404 });
+  }
+  // Not forwarded: see MERGED_TICKET_CHANGE_MESSAGE in lib/tickets/merge.ts.
+  if (ticket.mergedIntoTicketId) {
+    return NextResponse.json(
+      { error: MERGED_TICKET_CHANGE_MESSAGE },
+      { status: 409 }
+    );
   }
 
   const [customer] = await db
@@ -149,7 +152,7 @@ export async function PATCH(
         closedAt: statusRow.isClosedState ? now : null,
         updatedAt: now,
       })
-      .where(eq(tickets.id, ticketId));
+      .where(and(eq(tickets.id, ticketId), isNull(tickets.mergedIntoTicketId)));
 
     await db.insert(ticketActivity).values({
       id: createId(),
@@ -200,7 +203,7 @@ export async function PATCH(
     await db
       .update(tickets)
       .set({ category: newCategory, updatedAt: now })
-      .where(eq(tickets.id, ticketId));
+      .where(and(eq(tickets.id, ticketId), isNull(tickets.mergedIntoTicketId)));
 
     await db.insert(ticketActivity).values({
       id: createId(),
@@ -243,7 +246,7 @@ export async function PATCH(
     await db
       .update(tickets)
       .set({ priority: newPriority, updatedAt: now })
-      .where(eq(tickets.id, ticketId));
+      .where(and(eq(tickets.id, ticketId), isNull(tickets.mergedIntoTicketId)));
 
     await db.insert(ticketActivity).values({
       id: createId(),
@@ -281,7 +284,9 @@ export async function PATCH(
       await db
         .update(tickets)
         .set({ assignedAgentId: newAgentId, updatedAt: now })
-        .where(eq(tickets.id, ticketId));
+        .where(
+          and(eq(tickets.id, ticketId), isNull(tickets.mergedIntoTicketId))
+        );
 
       await db.insert(ticketActivity).values({
         id: createId(),
@@ -342,25 +347,8 @@ export async function DELETE(
     return NextResponse.json({ error: "Not found." }, { status: 404 });
   }
 
-  // Tickets merged into this one go with it (see withMergedShells).
-  const deleteIds = await withMergedShells([ticketId]);
-
-  // Delete storage files before DB records
-  const attachments = await db
-    .select({ storageKey: ticketAttachments.storageKey })
-    .from(ticketAttachments)
-    .where(inArray(ticketAttachments.ticketId, deleteIds));
-
-  for (const att of attachments) {
-    try {
-      await storage.delete(att.storageKey);
-    } catch {
-      // Non-fatal — proceed even if storage delete fails
-    }
-  }
-
-  // Delete ticket (cascade removes comments, activity, attachments)
-  await db.delete(tickets).where(inArray(tickets.id, deleteIds));
+  // Storage files first, then the ticket and every ticket merged into it.
+  await deleteTicketsWithMergedShells([ticketId]);
 
   await audit({
     action: "ticket.deleted",

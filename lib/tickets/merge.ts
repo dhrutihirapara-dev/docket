@@ -1,5 +1,5 @@
 import { createId } from "@paralleldrive/cuid2";
-import { and, asc, eq, inArray, isNull, or } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import {
   customers,
   ticketActivity,
@@ -8,6 +8,7 @@ import {
   ticketCustomFieldValues,
   ticketLinks,
   ticketReplyDrafts,
+  ticketStatuses,
   tickets,
   ticketTags,
 } from "@/db/schema";
@@ -26,6 +27,7 @@ import {
 import { textToRichTextJson } from "@/lib/rich-text";
 import { getTicketActionSettings } from "@/lib/settings";
 import { computeSlaTransition } from "@/lib/sla";
+import { storage } from "@/lib/storage";
 import { getClosedStatus, getTicketStatuses } from "@/lib/ticket-config";
 import { ticketLinkKey } from "@/lib/tickets/links";
 import { resolveTicketPortalUrl } from "@/lib/tickets/portal-url";
@@ -110,22 +112,118 @@ export async function insertReplyUnlessMerged(
   });
 }
 
+/** 409 for a state change (close / reopen / status / field edit) sent to a
+ * merged ticket. Those are deliberately NOT forwarded: a stale tab or an
+ * integrator's stored id would otherwise silently close or reassign the
+ * surviving ticket — a different conversation than the caller meant. Reads
+ * and replies still forward. */
+export const MERGED_TICKET_CHANGE_MESSAGE =
+  "This ticket was merged into another ticket, so it can't be changed. Refresh the page to open the ticket it was merged into.";
+
 export const MERGED_DURING_REPLY_MESSAGE =
   "This ticket was just merged into another ticket, so your message wasn't sent. Refresh the page and send it again.";
 
-/** `ticketIds` plus every ticket merged into one of them. Hard-delete paths
- * use this so deleting a surviving ticket also removes its merged shells —
- * otherwise their pointer is nulled by the FK and they'd resurface in lists as
- * empty closed tickets whose content was just deleted. */
-export async function withMergedShells(ticketIds: string[]): Promise<string[]> {
+/** Hard-deletes `ticketIds` plus every ticket merged into one of them —
+ * otherwise a deleted ticket's merged shells would have their pointer nulled
+ * by the FK and resurface in lists as closed tickets still holding their
+ * original description. The tickets are locked first (FOR UPDATE conflicts
+ * with merge's NO KEY UPDATE and its FK check), so a merge into one of them
+ * can't land between collecting the shells and deleting: it waits, then finds
+ * its target gone and answers 409. Storage files go before the DB rows, per
+ * the project rule; a storage failure is non-fatal. */
+export async function deleteTicketsWithMergedShells(
+  ticketIds: string[]
+): Promise<void> {
   if (ticketIds.length === 0) {
-    return [];
+    return;
   }
-  const shells = await db
-    .select({ id: tickets.id })
-    .from(tickets)
-    .where(inArray(tickets.mergedIntoTicketId, ticketIds));
-  return [...new Set([...ticketIds, ...shells.map((s) => s.id)])];
+  await db.transaction(async (tx) => {
+    await tx
+      .select({ id: tickets.id })
+      .from(tickets)
+      .where(inArray(tickets.id, ticketIds))
+      .orderBy(asc(tickets.id))
+      .for("update");
+    const shells = await tx
+      .select({ id: tickets.id })
+      .from(tickets)
+      .where(inArray(tickets.mergedIntoTicketId, ticketIds));
+    const deleteIds = [...new Set([...ticketIds, ...shells.map((t) => t.id)])];
+
+    const attachments = await tx
+      .select({ storageKey: ticketAttachments.storageKey })
+      .from(ticketAttachments)
+      .where(inArray(ticketAttachments.ticketId, deleteIds));
+    for (const att of attachments) {
+      await storage.delete(att.storageKey).catch(() => undefined);
+    }
+
+    // Cascade removes comments, activity, attachments, links, drafts.
+    await tx.delete(tickets).where(inArray(tickets.id, deleteIds));
+  });
+}
+
+/** Before an admin deletes a status / category / priority, moves the merged
+ * tickets still using its slug onto a valid value. Merged tickets are hidden
+ * and can't be edited (PATCH answers 409), so they're left out of the
+ * delete's "in use" count — without this they'd block the delete forever, or
+ * keep pointing at a slug that no longer exists. Category/priority take the
+ * value of the ticket they were merged into (which can't be using the slug —
+ * the caller already checked no visible ticket does); status takes another
+ * closed status, since a merged ticket must stay closed. False when merged
+ * tickets use the status and no other closed status exists. */
+export async function moveMergedTicketsOffSlug(
+  column: "status" | "category" | "priority",
+  slug: string
+): Promise<boolean> {
+  if (column === "status") {
+    const [replacement] = await db
+      .select({ slug: ticketStatuses.slug })
+      .from(ticketStatuses)
+      .where(
+        and(
+          eq(ticketStatuses.isClosedState, true),
+          ne(ticketStatuses.slug, slug)
+        )
+      )
+      .orderBy(asc(ticketStatuses.sortOrder))
+      .limit(1);
+    const shells = await db
+      .select({ id: tickets.id })
+      .from(tickets)
+      .where(
+        and(
+          eq(tickets.status, slug),
+          sql`${tickets.mergedIntoTicketId} IS NOT NULL`
+        )
+      )
+      .limit(1);
+    if (shells.length === 0) {
+      return true;
+    }
+    if (!replacement) {
+      return false;
+    }
+    await db
+      .update(tickets)
+      .set({ status: replacement.slug })
+      .where(
+        and(
+          eq(tickets.status, slug),
+          sql`${tickets.mergedIntoTicketId} IS NOT NULL`
+        )
+      );
+    return true;
+  }
+  const col = sql.identifier(column);
+  await db.execute(sql`
+    UPDATE "tickets" AS shell
+    SET ${col} = target.${col}
+    FROM "tickets" AS target
+    WHERE shell."merged_into_ticket_id" = target."id"
+      AND shell.${col} = ${slug}
+  `);
+  return true;
 }
 
 /** Route-level forwarding: what every ticket route calls first, so a request

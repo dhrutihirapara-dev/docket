@@ -75,7 +75,7 @@ export function buildOpenApiSpec(baseUrl: string): Record<string, unknown> {
         "",
         "## Merged tickets",
         "",
-        "Agents can merge a duplicate ticket into another ticket from the same customer. The merged ticket's id keeps working: every `/tickets/{id}/…` endpoint acts on the ticket it was merged into — reads return that ticket (compare the response's `id` with the one you requested to detect a merge), and replies and status changes land on it. Merged tickets are left out of `GET /tickets?email=`. A reply that races a merge gets a `409`; retrying it is safe and applies it to the merged ticket.",
+        "Agents can merge a duplicate ticket into another ticket from the same customer. The merged ticket's id keeps working for reads and replies, which act on the ticket it was merged into — reads return that ticket (compare the response's `id` with the one you requested to detect a merge), and replies land on it. Status changes are not forwarded: `PATCH /tickets/{id}/status` on a merged ticket returns `409` naming the ticket it was merged into. Merged tickets are left out of `GET /tickets?email=`. A reply that races a merge gets a `409`; retrying it is safe and applies it to the merged ticket.",
         "",
         "## Outbound webhooks",
         "",
@@ -589,6 +589,19 @@ export function buildOpenApiSpec(baseUrl: string): Record<string, unknown> {
             "401": { $ref: "#/components/responses/Unauthorized" },
             "403": { $ref: "#/components/responses/Forbidden" },
             "404": { $ref: "#/components/responses/NotFound" },
+            "409": {
+              description:
+                "The ticket was merged into another ticket. Status changes are not forwarded — apply the change to the ticket named in the message.",
+              content: {
+                "application/json": {
+                  schema: { $ref: "#/components/schemas/Error" },
+                  example: {
+                    error:
+                      "This ticket was merged into ticket clx0abc123, so its status can't be changed. Apply the change to that ticket instead.",
+                  },
+                },
+              },
+            },
             "429": {
               description:
                 "Rate limited — more than 60 status changes in a minute on this key.",

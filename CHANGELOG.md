@@ -9,20 +9,48 @@ Anything needing manual work on upgrade is called out under **Upgrade notes**.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-05
+
 ### Added
 
+- **Merge tickets.** Agents can fold a duplicate ticket into another open ticket from the
+  same customer (sidebar → Merge). The thread, attachments, tags, custom-field values and
+  links move to the surviving ticket; the merged ticket is closed and hidden from lists,
+  counts and reports. Its old portal link and API id keep working for reads and replies.
+  The customer gets a **Ticket Merged** email (can be turned off).
+- **Split a reply into a new ticket.** A customer's public reply can be moved out into a
+  new ticket for the same customer, linked back to the original. The customer gets the
+  usual "ticket created" email.
+- **Link tickets** as *related to*, *duplicate of* or *blocks*, shown in the sidebar.
+- **Ticket Actions settings** (Admin → Ticket Config): switch merge, split and linking
+  on or off, each with its own notification switch, plus the merge customer email.
+- **Reply drafts.** The agent reply composer autosaves per agent and ticket, restores on
+  return, shows a "Draft" marker in the ticket list, and has a Discard button.
 - **Web Push as an alternative to Pusher Beams** for OS-level agent notifications.
   **Admin → Integrations → Push Notifications** now has a provider dropdown, and it shows
   only the chosen provider's settings. Web Push uses the browser's built-in push service
   directly, so it needs no third-party account. A **Generate keys** button creates the
   VAPID key pair, and **Test connection** sends a real notification to the admin's own
   browser. Both providers cover every agent notification (new tickets and customer replies).
+- New opt-in webhook events `ticket.merged` and `ticket.split`. Existing endpoints don't
+  receive them unless subscribed.
+
+### Changed
+
+- `PATCH /api/v1/tickets/:id/status` on a merged ticket returns `409` (naming the ticket it
+  was merged into) instead of acting on that ticket, so a stored id can never close or reopen
+  a different conversation. Status changes on non-merged tickets are unchanged.
 
 ### Upgrade notes
 
-- Run migrations (`pnpm db:migrate`, or automatic on container start). They add the
-  `push_subscriptions` table and new `integration_settings` columns. Existing Pusher Beams
-  setups keep working unchanged, because the provider defaults to `pusher`.
+- Run migrations (`pnpm db:migrate`, or automatic on container start). They only add
+  things — no existing data is changed: the `ticket_reply_drafts`, `push_subscriptions` and
+  `ticket_links` tables, `tickets.merged_into_ticket_id` / `merged_at`, new
+  `integration_settings` columns, and the ticket-action switches on `platform_settings`.
+- **Merge, split and linking are switched on after upgrading** (all switches default to
+  on). Turn any of them off under **Admin → Ticket Config → Ticket Actions**.
+- Existing Pusher Beams setups keep working unchanged, because the push provider defaults
+  to `pusher`. No new environment variables are required.
 
 ## [0.5.0] - 2026-08-27
 
@@ -238,6 +266,7 @@ Replying by email, satisfaction ratings after a request is closed, a spreadsheet
 of the request list itself, one-click deploy buttons, and attachments and webhooks in the
 public API. See the Roadmap in the README.
 
-[Unreleased]: https://github.com/stack256org/docket/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/stack256org/docket/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/stack256org/docket/compare/v0.5.0...v0.6.0
 [0.2.0]: https://github.com/stack256org/docket/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/stack256org/docket/releases/tag/v0.1.0

@@ -1,4 +1,4 @@
-import { count, gte, sql } from "drizzle-orm";
+import { and, count, gte, isNull, sql } from "drizzle-orm";
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { tickets } from "@/db/schema";
@@ -24,7 +24,9 @@ export async function GET(request: NextRequest) {
       count: count(),
     })
     .from(tickets)
-    .where(gte(tickets.createdAt, since))
+    .where(
+      and(gte(tickets.createdAt, since), isNull(tickets.mergedIntoTicketId))
+    )
     .groupBy(sql`DATE(${tickets.createdAt})`)
     .orderBy(sql`DATE(${tickets.createdAt})`);
 

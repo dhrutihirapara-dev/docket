@@ -4,6 +4,7 @@ import { getSessionUserFromRequest } from "@/lib/authz";
 import { getPushProvider } from "@/lib/integration-settings";
 import {
   deleteWebPushSubscription,
+  isAllowedPushEndpoint,
   saveWebPushSubscription,
 } from "@/lib/web-push";
 
@@ -52,7 +53,7 @@ export async function POST(request: NextRequest) {
   const auth = body.keys?.auth;
   if (
     !(isValidField(endpoint) && isValidField(p256dh) && isValidField(auth)) ||
-    !endpoint.startsWith("https://")
+    !isAllowedPushEndpoint(endpoint)
   ) {
     return NextResponse.json(
       { error: "Invalid push subscription." },
