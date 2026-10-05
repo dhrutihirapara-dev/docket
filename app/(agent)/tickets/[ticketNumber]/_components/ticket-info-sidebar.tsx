@@ -1,9 +1,15 @@
 "use client";
 
-import { ClockIcon, TrashIcon, UserIcon } from "@phosphor-icons/react";
+import {
+  ClockIcon,
+  GitMergeIcon,
+  TrashIcon,
+  UserIcon,
+} from "@phosphor-icons/react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { toast } from "sonner";
+import { MergeTicketsDialog } from "@/components/agent/merge-tickets-dialog";
 import { SearchableSelect } from "@/components/common/searchable-select";
 import {
   SlaMetricBadge,
@@ -38,10 +44,13 @@ import {
   COLOR_BADGE,
   formatTicketDateTime,
 } from "@/lib/tickets";
+import { type TicketLinkType, ticketLinkLabel } from "@/lib/tickets/link-types";
+import type { TicketLinkView } from "@/lib/tickets/links";
 import { getInitials } from "@/lib/utils";
 import { CustomerProfilePopover } from "./customer-profile-popover";
 import { SidebarCard } from "./sidebar-card";
 import { TicketCustomFields } from "./ticket-custom-fields";
+import { TicketLinks } from "./ticket-links";
 import { TicketTags } from "./ticket-tags";
 
 type Agent = { id: string; name: string | null; email: string };
@@ -58,10 +67,16 @@ interface Activity {
 interface Props {
   activity: Activity[];
   agents: Agent[];
+  /** Admin switches (Admin → Ticket Config → Ticket Actions). */
+  canLink: boolean;
+  canMerge: boolean;
   categories: TicketCategory[];
   currentUserId: string;
   customFields: CustomFieldWithValue[];
   isAdmin?: boolean;
+  links: TicketLinkView[];
+  /** A merge sends the customer the "Ticket Merged" email. */
+  mergeEmailsCustomer: boolean;
   priorities: TicketPriority[];
   /** The agent's "Show SLA & Overdue" preference (lib/sla-display-pref.ts) —
    * off shows only the waiting time, not SLA/overdue badges, same as the
@@ -93,6 +108,8 @@ export function TicketInfoSidebar({
   ticket,
   agents,
   activity,
+  canLink,
+  canMerge,
   statuses,
   categories,
   priorities,
@@ -102,6 +119,8 @@ export function TicketInfoSidebar({
   customFields,
   currentUserId,
   isAdmin = false,
+  links,
+  mergeEmailsCustomer,
 }: Props) {
   const statusMap = Object.fromEntries(statuses.map((s) => [s.slug, s]));
   const categoryMap = Object.fromEntries(categories.map((c) => [c.slug, c]));
@@ -146,6 +165,36 @@ export function TicketInfoSidebar({
       const m = a.metadata as { field?: string } | null;
       return `${m?.field ?? "Custom field"} updated`;
     },
+    ticket_linked: (a) => {
+      const m = a.metadata as {
+        type?: TicketLinkType;
+        direction?: "outgoing" | "incoming";
+        ticketNumber?: number;
+      } | null;
+      return m?.type
+        ? `Link added: ${ticketLinkLabel(m.type, m.direction ?? "outgoing").toLowerCase()} #${m.ticketNumber}`
+        : "Ticket linked";
+    },
+    ticket_unlinked: (a) => {
+      const m = a.metadata as { ticketNumber?: number } | null;
+      return `Link to #${m?.ticketNumber ?? "?"} removed`;
+    },
+    merged_into: (a) => {
+      const m = a.metadata as { ticketNumber?: number } | null;
+      return `Merged into #${m?.ticketNumber ?? "?"}`;
+    },
+    merged_from: (a) => {
+      const m = a.metadata as { ticketNumber?: number } | null;
+      return `Merged #${m?.ticketNumber ?? "?"} into this ticket`;
+    },
+    split_to: (a) => {
+      const m = a.metadata as { ticketNumber?: number } | null;
+      return `Reply split into new ticket #${m?.ticketNumber ?? "?"}`;
+    },
+    split_from: (a) => {
+      const m = a.metadata as { ticketNumber?: number } | null;
+      return `Split from #${m?.ticketNumber ?? "?"}`;
+    },
   };
   const router = useRouter();
 
@@ -165,6 +214,7 @@ export function TicketInfoSidebar({
   const [closeOpen, setCloseOpen] = useState(false);
   const [pendingClose, setPendingClose] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [mergeOpen, setMergeOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -270,7 +320,10 @@ export function TicketInfoSidebar({
       toast.success("Ticket reopened.");
       router.refresh();
     } else {
-      toast.error("Failed to reopen ticket.");
+      const data = (await res.json().catch(() => null)) as {
+        error?: string;
+      } | null;
+      toast.error(data?.error ?? "Failed to reopen ticket.");
     }
   }
 
@@ -393,30 +446,50 @@ export function TicketInfoSidebar({
           )}
         </div>
 
-        {statusMap[status]?.isClosedState ? (
-          <Button
-            className="w-full border-base-300 text-base-content hover:bg-base-300 text-xs"
-            disabled={loading}
-            onClick={handleReopen}
-            size="sm"
-            variant="outline"
-          >
-            Reopen Ticket
-          </Button>
-        ) : (
-          <Button
-            className="w-full border-red-200 text-red-600 hover:bg-red-50 text-xs"
-            disabled={loading}
-            onClick={() => {
-              setPendingClose(null);
-              setCloseOpen(true);
-            }}
-            size="sm"
-            variant="outline"
-          >
-            Close Ticket
-          </Button>
-        )}
+        {/* Lifecycle actions — one tight stack so Merge reads as part of the
+            same group as Close/Reopen rather than a separate section. */}
+        <div className="space-y-2">
+          {statusMap[status]?.isClosedState ? (
+            <Button
+              className="w-full border-base-300 text-base-content hover:bg-base-300 text-xs"
+              disabled={loading}
+              onClick={handleReopen}
+              size="sm"
+              variant="outline"
+            >
+              Reopen Ticket
+            </Button>
+          ) : (
+            <Button
+              className="w-full border-red-200 text-red-600 hover:bg-red-50 text-xs"
+              disabled={loading}
+              onClick={() => {
+                setPendingClose(null);
+                setCloseOpen(true);
+              }}
+              size="sm"
+              variant="outline"
+            >
+              Close Ticket
+            </Button>
+          )}
+
+          {/* Short label on purpose: buttons are uppercase + nowrap, and a
+              longer one overflows the 18rem sidebar. The dialog explains the
+              rest ("merge into which ticket"). */}
+          {canMerge && (
+            <Button
+              className="w-full border-base-300 text-base-content hover:bg-base-300 text-xs"
+              disabled={loading}
+              onClick={() => setMergeOpen(true)}
+              size="sm"
+              variant="outline"
+            >
+              <GitMergeIcon className="size-3.5" />
+              Merge Ticket
+            </Button>
+          )}
+        </div>
 
         {error && <p className="text-xs text-red-600">{error}</p>}
       </SidebarCard>
@@ -468,6 +541,24 @@ export function TicketInfoSidebar({
       <SidebarCard title="Tags" {...accordionProps("tags")}>
         <TicketTags initialTags={tags} ticketId={ticket.id} />
       </SidebarCard>
+
+      {/* Linked Tickets — with linking off, existing links stay visible
+          (read-only); with none, the card has nothing to show. */}
+      {(canLink || links.length > 0) && (
+        <SidebarCard
+          count={links.length}
+          title="Linked Tickets"
+          {...accordionProps("links")}
+        >
+          <TicketLinks
+            editable={canLink}
+            initialLinks={links}
+            key={ticket.id}
+            statuses={statuses}
+            ticketId={ticket.id}
+          />
+        </SidebarCard>
+      )}
 
       {/* Custom Fields */}
       {customFields.length > 0 && (
@@ -617,6 +708,24 @@ export function TicketInfoSidebar({
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <MergeTicketsDialog
+        baseTickets={[ticket]}
+        customerId={ticket.customerId}
+        emailsCustomer={mergeEmailsCustomer}
+        onMerged={({ mergedIds, targetTicketNumber }) => {
+          // This ticket was folded into another: it's now a closed shell that
+          // redirects, so go to the survivor. Otherwise this IS the survivor.
+          if (mergedIds.includes(ticket.id)) {
+            router.push(`/tickets/${targetTicketNumber}`);
+          } else {
+            router.refresh();
+          }
+        }}
+        onOpenChange={setMergeOpen}
+        open={mergeOpen}
+        statuses={statuses}
+      />
 
       {/* Delete Ticket dialog */}
       <Dialog onOpenChange={setDeleteOpen} open={deleteOpen}>

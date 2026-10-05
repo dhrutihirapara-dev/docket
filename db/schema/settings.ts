@@ -26,6 +26,32 @@ export const platformSettings = pgTable("platform_settings", {
   ticketEmailNotificationsEnabled: boolean("ticket_email_notifications_enabled")
     .notNull()
     .default(true),
+  // Ticket actions (Admin → Ticket Config). Each action has a feature switch
+  // (off hides its UI and the API refuses it; existing links stay visible) and
+  // a switch for the in-app notifications it sends. All on by default.
+  ticketMergeEnabled: boolean("ticket_merge_enabled").notNull().default(true),
+  ticketMergeNotificationsEnabled: boolean(
+    "ticket_merge_notifications_enabled"
+  )
+    .notNull()
+    .default(true),
+  // Email the customer on merge (the "Ticket Merged" email template). Also
+  // gated by ticketEmailNotificationsEnabled, like every ticket email.
+  ticketMergeCustomerEmailEnabled: boolean(
+    "ticket_merge_customer_email_enabled"
+  )
+    .notNull()
+    .default(true),
+  ticketSplitEnabled: boolean("ticket_split_enabled").notNull().default(true),
+  ticketSplitNotificationsEnabled: boolean(
+    "ticket_split_notifications_enabled"
+  )
+    .notNull()
+    .default(true),
+  ticketLinkEnabled: boolean("ticket_link_enabled").notNull().default(true),
+  ticketLinkNotificationsEnabled: boolean("ticket_link_notifications_enabled")
+    .notNull()
+    .default(true),
   // Set only once the wizard's Integrations step is finished or skipped. Null
   // means the admin account exists but the wizard doesn't, so `/setup` resumes
   // rather than treating setup as done — see isSetupComplete vs hasAdminUser.

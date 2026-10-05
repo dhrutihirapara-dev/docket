@@ -1,3 +1,4 @@
+import { getTicketActionSettings } from "@/lib/settings";
 // import { getSlaPolicies } from "@/lib/sla-policies";
 import {
   getTicketCategories,
@@ -8,6 +9,7 @@ import { CategoriesManager } from "./_components/categories-manager";
 import { PrioritiesManager } from "./_components/priorities-manager";
 // import { SlaPoliciesManager } from "./_components/sla-policies-manager";
 import { StatusesManager } from "./_components/statuses-manager";
+import { TicketActionsSettingsForm } from "./_components/ticket-actions-settings-form";
 
 export const metadata = { title: "Ticket Config" };
 
@@ -15,16 +17,18 @@ export const metadata = { title: "Ticket Config" };
 // <SlaPoliciesManager> render below are commented out, not deleted, so the
 // feature can be restored by uncommenting.
 export default async function TicketConfigPage() {
-  const [statuses, categories, priorities /* , slaPolicies */] =
+  const [statuses, categories, priorities, ticketActions /* , slaPolicies */] =
     await Promise.all([
       getTicketStatuses(),
       getTicketCategories(),
       getTicketPriorities(),
+      getTicketActionSettings(),
       // getSlaPolicies(),
     ]);
 
   return (
     <div className="p-6 space-y-8 max-w-4xl mx-auto">
+      <TicketActionsSettingsForm initialSettings={ticketActions} />
       <StatusesManager initialStatuses={statuses} />
       <CategoriesManager initialCategories={categories} />
       <PrioritiesManager initialPriorities={priorities} />

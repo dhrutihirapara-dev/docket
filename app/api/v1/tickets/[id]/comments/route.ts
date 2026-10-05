@@ -1,5 +1,5 @@
 import { createId } from "@paralleldrive/cuid2";
-import { and, asc, count, eq, or, sql } from "drizzle-orm";
+import { and, asc, count, eq, isNull, or, sql } from "drizzle-orm";
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { ADMIN_ROLE, AGENT_ROLE } from "@/config/platform";
@@ -34,6 +34,10 @@ import {
   uploadDecodedAttachments,
 } from "@/lib/tickets/api-attachments";
 import {
+  insertReplyUnlessMerged,
+  resolveMergedTicketId,
+} from "@/lib/tickets/merge";
+import {
   dispatchWebhookEvent,
   ticketPayloadData,
 } from "@/lib/webhooks/dispatch";
@@ -51,7 +55,9 @@ export async function GET(
     return e as Response;
   }
 
-  const { id } = await params;
+  const { id: requestedId } = await params;
+  // A merged ticket forwards to the ticket it was merged into (lib/tickets/merge.ts).
+  const id = await resolveMergedTicketId(requestedId);
 
   const [ticket] = await db
     .select({ id: tickets.id })
@@ -143,7 +149,9 @@ export async function POST(
     return e as Response;
   }
 
-  const { id: ticketId } = await params;
+  const { id: requestedTicketId } = await params;
+  // A merged ticket forwards to the ticket it was merged into (lib/tickets/merge.ts).
+  const ticketId = await resolveMergedTicketId(requestedTicketId);
 
   const { allowed } = await checkRateLimit({
     action: "api_ticket_reply",
@@ -233,7 +241,8 @@ export async function POST(
     .select({ value: count() })
     .from(ticketAttachments)
     .where(eq(ticketAttachments.ticketId, ticketId));
-  const remaining = API_MAX_ATTACHMENTS_PER_TICKET - existingCount;
+  // Clamped: a merge can leave a ticket above the cap.
+  const remaining = Math.max(0, API_MAX_ATTACHMENTS_PER_TICKET - existingCount);
 
   const decoded = decodeBase64Attachments(body.attachments, remaining);
   if (!decoded.ok) {
@@ -255,33 +264,45 @@ export async function POST(
   }
 
   try {
-    await db.insert(ticketComments).values({
-      id: commentId,
+    const inserted = await insertReplyUnlessMerged(
       ticketId,
-      authorId: null,
-      authorName: ticket.customerName,
-      authorRole: "customer",
-      content,
-      isInternal: false,
-      createdAt: now,
-      updatedAt: now,
-    });
-
-    if (uploaded.length > 0) {
-      await db.insert(ticketAttachments).values(
-        uploaded.map((a) => ({
-          id: a.id,
-          ticketId,
-          commentId,
-          filename: a.filename,
-          storageKey: a.storageKey,
-          fileSize: a.fileSize,
-          mimeType: a.mimeType,
-          uploadedById: null,
-          uploadedByName: ticket.customerName,
-          uploadedByRole: "customer",
-          createdAt: now,
-        }))
+      {
+        id: commentId,
+        ticketId,
+        authorId: null,
+        authorName: ticket.customerName,
+        authorRole: "customer",
+        content,
+        isInternal: false,
+        createdAt: now,
+        updatedAt: now,
+      },
+      uploaded.map((a) => ({
+        id: a.id,
+        ticketId,
+        commentId,
+        filename: a.filename,
+        storageKey: a.storageKey,
+        fileSize: a.fileSize,
+        mimeType: a.mimeType,
+        uploadedById: null,
+        uploadedByName: ticket.customerName,
+        uploadedByRole: "customer",
+        createdAt: now,
+      }))
+    );
+    if (!inserted) {
+      for (const a of uploaded) {
+        await storage.delete(a.storageKey).catch(() => undefined);
+      }
+      // Retrying the same request is safe: the id now forwards to the
+      // ticket it was merged into.
+      return NextResponse.json(
+        {
+          error:
+            "This ticket was just merged into another ticket. Retry the request — it will be applied to the merged ticket.",
+        },
+        { status: 409 }
       );
     }
 
@@ -303,7 +324,7 @@ export async function POST(
         pendingReplies: sql`${tickets.pendingReplies} + 1`,
         ...slaUpdate,
       })
-      .where(eq(tickets.id, ticketId));
+      .where(and(eq(tickets.id, ticketId), isNull(tickets.mergedIntoTicketId)));
 
     await db.insert(ticketActivity).values({
       id: createId(),
@@ -382,6 +403,7 @@ export async function POST(
       title: notifTitle,
       body: contentText.slice(0, 120),
       deepLink: `${env.NEXT_PUBLIC_APP_URL}/tickets/${ticket.ticketNumber}`,
+      tag: `ticket-${ticket.ticketNumber}`,
     }).catch((err) => console.error("[push.customer_replied]", err));
 
     return NextResponse.json({ id: commentId }, { status: 201 });

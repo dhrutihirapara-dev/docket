@@ -172,8 +172,12 @@ function SelectContent({
     <ListboxOptions
       anchor={{ gap: 4, padding: 8, to: anchor }}
       as="ul"
+      // z-[60], one above Popover/Dialog (z-50): an open listbox is always
+      // the topmost layer, but it's portaled separately, so at an equal
+      // z-index a Popover mounted later (e.g. the ticket "Link ticket"
+      // popover) paints over its options and swallows clicks on them.
       className={cn(
-        "menu z-50 max-h-72 min-w-(--button-width) flex-nowrap overflow-x-hidden overflow-y-auto rounded-box bg-base-100 text-base-content shadow-md ring-1 ring-base-content/10 outline-hidden transition duration-100 data-closed:scale-95 data-closed:opacity-0",
+        "menu z-[60] max-h-72 min-w-(--button-width) flex-nowrap overflow-x-hidden overflow-y-auto rounded-box bg-base-100 text-base-content shadow-md ring-1 ring-base-content/10 outline-hidden transition duration-100 data-closed:scale-95 data-closed:opacity-0",
         className
       )}
       data-slot="select-content"

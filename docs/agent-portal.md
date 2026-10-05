@@ -47,13 +47,16 @@ Agents can filter the list by:
 
 Filters are combinable. Active filters are shown as removable chips above the list.
 
-### Bulk Actions (Admin only)
+### Bulk Actions
 
-- Select multiple tickets with checkboxes.
+- Select multiple tickets with checkboxes. Admins get every action below; agents get the
+  checkboxes only for **Merge** (shown only while merging is switched on) — the other
+  actions are admin-only, enforced by `/api/tickets/bulk`.
 - Bulk assign to an agent.
 - Bulk change status.
 - Bulk change priority.
 - Bulk add a tag (search the shared tag pool or create a new one — same freeform pool as the ticket detail page's tag picker).
+- Bulk merge (admins and agents; 2+ tickets from the same customer): pick the primary ticket — it must be open; the oldest open one is preselected — and the rest are merged into it in one all-or-nothing request, with one customer email. Same dialog as the sidebar's Merge Ticket — see [tickets.md § Merge](./tickets.md#merge). Hidden when an admin turns merging off.
 - Bulk delete (spam — admin only).
 
 ---
@@ -117,6 +120,15 @@ The full ticket view for agents. Split into two panels:
 - Submit button: "Send Reply".
 - After submit: appears in the thread, customer receives an email notification (email/notification previews use a plain-text flattening of the reply).
 
+### Reply Drafts
+
+- The composer auto-saves the agent's unsent reply ~1s after they stop typing (and immediately when they leave the page or move to Previous/Next), to `ticket_reply_drafts` via `PUT /api/tickets/{id}/draft`.
+- Drafts are **per agent, per ticket** — never visible to other agents or the customer — and follow the agent across browsers/devices. The internal-note mode is saved with the text.
+- On returning to the ticket, the draft is restored into the composer. The action bar shows "Saving draft…" / "Draft saved · {time}" / "Couldn't save draft", plus a trash button that discards it (with a confirmation dialog; `DELETE /api/tickets/{id}/draft`).
+- Sending the reply deletes the draft server-side (in the comments route). Clearing the composer also deletes it.
+- Attachments are not drafted — unsent files only live in the browser tab.
+- `/tickets` shows a pencil icon (browser tooltip "Draft — unsent reply saved" on hover) next to the subject of every ticket where the current agent has a saved draft.
+
 ### Internal Note
 
 - Toggled via a tab or toggle above the reply form: "Reply" / "Internal Note".
@@ -142,6 +154,19 @@ The full ticket view for agents. Split into two panels:
 - "Reopen" button shown when status is `closed`.
 - No confirmation dialog needed.
 - Status → `open`, activity logged.
+
+### Merge, Split & Link
+
+- **Merge into another ticket** (sidebar button) — dialog lists the same customer's other
+  open tickets; picking one merges this ticket into it and navigates there. Irreversible.
+- **Split** (icon on each customer reply) — moves that reply into a new ticket; the dialog
+  asks for the new subject.
+- **Linked Tickets** (sidebar card) — add a `related_to` / `duplicate_of` / `blocks` link by
+  ticket number, or remove one. Links also show as chips in the ticket header and as a
+  link icon in the ticket list; the other ticket's assignee gets a notification.
+- Opening `/tickets/{n}` for a merged ticket redirects to the ticket it was merged into.
+
+Full rules: [tickets.md § Merge, Split & Link](./tickets.md#merge-split--link).
 
 ---
 

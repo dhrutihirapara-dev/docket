@@ -1,5 +1,5 @@
 import { createId } from "@paralleldrive/cuid2";
-import { and, count, eq, or, sql } from "drizzle-orm";
+import { and, count, eq, isNull, or, sql } from "drizzle-orm";
 import type { NextRequest } from "next/server";
 import { NextResponse } from "next/server";
 import { ADMIN_ROLE, AGENT_ROLE } from "@/config/platform";
@@ -7,7 +7,6 @@ import {
   customers,
   ticketActivity,
   ticketAttachments,
-  ticketComments,
   tickets,
   user,
 } from "@/db/schema";
@@ -24,7 +23,13 @@ import { isRichTextEmpty, richTextToPlainText } from "@/lib/rich-text";
 import { computeSlaTransition } from "@/lib/sla";
 import { storage } from "@/lib/storage";
 import { isClosedStatusSlug } from "@/lib/ticket-config";
+import {
+  forwardMergedTicket,
+  insertReplyUnlessMerged,
+  MERGED_DURING_REPLY_MESSAGE,
+} from "@/lib/tickets/merge";
 import { resolveTicketPortalUrl } from "@/lib/tickets/portal-url";
+import { deleteReplyDraft } from "@/lib/tickets/reply-drafts";
 import {
   dispatchWebhookEvent,
   ticketPayloadData,
@@ -44,7 +49,7 @@ export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
-  const { id: ticketId } = await params;
+  const { id: requestedTicketId } = await params;
 
   let formData: FormData;
   try {
@@ -54,7 +59,14 @@ export async function POST(
   }
 
   const content = String(formData.get("content") ?? "").trim();
-  const token = String(formData.get("token") ?? "").trim();
+  const rawToken = String(formData.get("token") ?? "").trim();
+  // A merged ticket forwards to the ticket it was merged into (lib/tickets/merge.ts).
+  const forwarded = await forwardMergedTicket(
+    requestedTicketId,
+    rawToken || undefined
+  );
+  const ticketId = forwarded.ticketId;
+  const token = forwarded.token ?? "";
   const attachmentFiles = formData
     .getAll("attachments")
     .filter((v): v is File => v instanceof File && v.size > 0);
@@ -205,11 +217,15 @@ export async function POST(
       .from(ticketAttachments)
       .where(eq(ticketAttachments.ticketId, ticketId));
 
-    const remaining = MAX_ATTACHMENTS_PER_TICKET - existingCount;
+    // Clamped: a merge can leave a ticket above the cap.
+    const remaining = Math.max(0, MAX_ATTACHMENTS_PER_TICKET - existingCount);
     if (attachmentFiles.length > remaining) {
       return NextResponse.json(
         {
-          error: `Only ${remaining} more attachment(s) allowed on this ticket.`,
+          error:
+            remaining === 0
+              ? `This ticket already has the maximum of ${MAX_ATTACHMENTS_PER_TICKET} attachments.`
+              : `Only ${remaining} more attachment(s) allowed on this ticket.`,
         },
         { status: 400 }
       );
@@ -257,33 +273,51 @@ export async function POST(
   }
 
   try {
-    await db.insert(ticketComments).values({
-      id: commentId,
+    const inserted = await insertReplyUnlessMerged(
       ticketId,
-      authorId: authorId ?? null,
-      authorName,
-      authorRole,
-      content,
-      isInternal,
-      createdAt: now,
-      updatedAt: now,
-    });
+      {
+        id: commentId,
+        ticketId,
+        authorId: authorId ?? null,
+        authorName,
+        authorRole,
+        content,
+        isInternal,
+        createdAt: now,
+        updatedAt: now,
+      },
+      uploadedAttachments.map((a) => ({
+        id: a.id,
+        ticketId,
+        commentId,
+        filename: a.filename,
+        storageKey: a.storageKey,
+        fileSize: a.fileSize,
+        mimeType: a.mimeType,
+        uploadedById: authorId ?? null,
+        uploadedByName: authorName,
+        uploadedByRole: authorRole,
+        createdAt: now,
+      }))
+    );
+    if (!inserted) {
+      for (const a of uploadedAttachments) {
+        await storage.delete(a.storageKey).catch(() => undefined);
+      }
+      return NextResponse.json(
+        { error: MERGED_DURING_REPLY_MESSAGE },
+        { status: 409 }
+      );
+    }
 
-    if (uploadedAttachments.length > 0) {
-      await db.insert(ticketAttachments).values(
-        uploadedAttachments.map((a) => ({
-          id: a.id,
-          ticketId,
-          commentId,
-          filename: a.filename,
-          storageKey: a.storageKey,
-          fileSize: a.fileSize,
-          mimeType: a.mimeType,
-          uploadedById: authorId ?? null,
-          uploadedByName: authorName,
-          uploadedByRole: authorRole,
-          createdAt: now,
-        }))
+    // The reply is out — drop the agent's saved draft for this ticket so the
+    // composer and the /tickets "Draft" marker don't resurrect it. Best
+    // effort: the comment row is already written, so a failure here must not
+    // fall into the catch below and report the reply as failed (the agent
+    // would resend it, duplicating the reply).
+    if (authorId && authorRole !== "customer") {
+      await deleteReplyDraft(ticketId, authorId).catch((err) =>
+        console.error("[reply-draft.delete]", err)
       );
     }
 
@@ -323,7 +357,7 @@ export async function POST(
         ...slaUpdate,
         ...firstResponseUpdate,
       })
-      .where(eq(tickets.id, ticketId));
+      .where(and(eq(tickets.id, ticketId), isNull(tickets.mergedIntoTicketId)));
 
     await db.insert(ticketActivity).values({
       id: createId(),
@@ -433,11 +467,12 @@ export async function POST(
         ticketNumber: ticketData.ticketNumber,
       }).catch((err) => console.error("[notification.customer_replied]", err));
 
-      // OS-level push (no-op unless Pusher Beams is configured).
+      // OS-level push (Pusher Beams or Web Push, whichever is selected; no-op unless configured).
       await publishPushToUsers(recipientIds, {
         title: notifTitle,
         body: contentText.slice(0, 120),
         deepLink: `${env.NEXT_PUBLIC_APP_URL}/tickets/${ticketData.ticketNumber}`,
+        tag: `ticket-${ticketData.ticketNumber}`,
       }).catch((err) => console.error("[push.customer_replied]", err));
     }
 

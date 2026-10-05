@@ -5,6 +5,11 @@ import { platformSettings } from "@/db/schema/settings";
 import { audit } from "@/lib/audit";
 import { requireAdminFromRequest } from "@/lib/authz";
 import { db } from "@/lib/db";
+import {
+  pickTicketActionSettings,
+  TICKET_ACTION_SETTING_KEYS,
+  type TicketActionSettings,
+} from "@/lib/ticket-actions";
 
 const VALID_THEMES = new Set([
   "default",
@@ -17,7 +22,7 @@ const VALID_THEMES = new Set([
 const VALID_APPEARANCES = new Set(["light", "dark", "auto"]);
 const HEX_COLOR_RE = /^#[0-9a-fA-F]{6}$/;
 
-interface SettingsBody {
+interface SettingsBody extends Partial<TicketActionSettings> {
   appearanceMode?: string;
   brandName?: string | null;
   emailAccentColor?: string | null;
@@ -47,6 +52,7 @@ export async function GET(_request: NextRequest) {
     brandName: row?.brandName ?? null,
     logoKey: row?.logoKey ?? null,
     emailAccentColor: row?.emailAccentColor ?? null,
+    ...pickTicketActionSettings(row),
   });
 }
 
@@ -86,6 +92,18 @@ export async function PATCH(request: NextRequest) {
     body.ticketEmailNotificationsEnabled ??
     existing?.ticketEmailNotificationsEnabled ??
     true;
+  const ticketActions = pickTicketActionSettings(existing);
+  for (const key of TICKET_ACTION_SETTING_KEYS) {
+    if (body[key] !== undefined) {
+      if (typeof body[key] !== "boolean") {
+        return NextResponse.json(
+          { error: "Invalid ticket action setting." },
+          { status: 400 }
+        );
+      }
+      ticketActions[key] = body[key];
+    }
+  }
   const brandName =
     body.brandName === undefined
       ? (existing?.brandName ?? null)
@@ -138,6 +156,7 @@ export async function PATCH(request: NextRequest) {
       magicLinkEnabled,
       googleLoginEnabled,
       ticketEmailNotificationsEnabled,
+      ...ticketActions,
       brandName,
       emailAccentColor,
       updatedAt: now,
@@ -151,6 +170,7 @@ export async function PATCH(request: NextRequest) {
         magicLinkEnabled,
         googleLoginEnabled,
         ticketEmailNotificationsEnabled,
+        ...ticketActions,
         brandName,
         emailAccentColor,
         updatedAt: now,
@@ -171,6 +191,7 @@ export async function PATCH(request: NextRequest) {
       magicLinkEnabled,
       googleLoginEnabled,
       ticketEmailNotificationsEnabled,
+      ...ticketActions,
       brandName,
       emailAccentColor,
     },
@@ -183,6 +204,7 @@ export async function PATCH(request: NextRequest) {
     magicLinkEnabled,
     googleLoginEnabled,
     ticketEmailNotificationsEnabled,
+    ...ticketActions,
     brandName,
     emailAccentColor,
   });

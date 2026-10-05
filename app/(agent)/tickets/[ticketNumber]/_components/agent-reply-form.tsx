@@ -4,16 +4,26 @@ import {
   LockSimpleIcon,
   PaperclipIcon,
   PaperPlaneTiltIcon,
+  TrashIcon,
   XIcon,
 } from "@phosphor-icons/react";
 import { useRouter } from "next/navigation";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
+import { LocalDateTime } from "@/components/common/local-datetime";
 import {
   RichTextEditor,
   type RichTextEditorHandle,
 } from "@/components/common/rich-text-editor";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { isRichTextEmpty } from "@/lib/rich-text";
 import { scrollChatToBottom } from "@/lib/scroll-chat";
 import { cn } from "@/lib/utils";
@@ -26,9 +36,35 @@ const ALLOWED_TYPES = new Set([
   "text/plain",
 ]);
 const MAX_FILE_SIZE = 10 * 1024 * 1024;
+// Autosave fires this long after the last keystroke / internal-note toggle.
+const DRAFT_SAVE_DELAY_MS = 1000;
+// A failed save is retried after this long, even if the agent stops typing.
+const DRAFT_RETRY_DELAY_MS = 5000;
+// Browsers reject keepalive requests whose body exceeds 64 KiB.
+const KEEPALIVE_BODY_LIMIT = 60_000;
+const EMPTY_DRAFT_KEY = "empty";
+
+type DraftStatus = "idle" | "saving" | "saved" | "error";
+
+/** Identity of a draft's saveable state — compared against the last
+ * successfully saved key so unchanged drafts are never re-sent. Every empty
+ * composer maps to one key, so toggling "Internal note" on an empty box
+ * doesn't create a draft. */
+function draftKey(content: string, isInternal: boolean) {
+  return isRichTextEmpty(content)
+    ? EMPTY_DRAFT_KEY
+    : JSON.stringify([content, isInternal]);
+}
 
 interface Props {
   cannedResponses?: { id: string; title: string; content: string }[];
+  /** The agent's own saved, unsent reply for this ticket (see
+   * db/schema/reply-drafts.ts) — restored into the composer on load. */
+  initialDraft?: {
+    content: string;
+    isInternal: boolean;
+    updatedAt: string;
+  } | null;
   sendReplyOnEnter: boolean;
   ticketId: string;
   totalAttachments: number;
@@ -38,6 +74,7 @@ export function AgentReplyForm({
   ticketId,
   totalAttachments,
   cannedResponses,
+  initialDraft,
   sendReplyOnEnter,
 }: Props) {
   const router = useRouter();
@@ -45,13 +82,207 @@ export function AgentReplyForm({
   const formRef = useRef<HTMLFormElement>(null);
   const editorRef = useRef<RichTextEditorHandle>(null);
 
-  const [isInternal, setIsInternal] = useState(false);
-  const [content, setContent] = useState("");
+  const [isInternal, setIsInternal] = useState(
+    initialDraft?.isInternal ?? false
+  );
+  const [content, setContent] = useState(initialDraft?.content ?? "");
   const [files, setFiles] = useState<File[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   const maxNewFiles = Math.max(0, 5 - totalAttachments);
+
+  // ── Draft autosave ──
+  // The reply is saved server-side per (ticket, agent) so it survives a
+  // refresh, closing the tab, or coming back from another device days later.
+  const [draftStatus, setDraftStatus] = useState<DraftStatus>(
+    initialDraft ? "saved" : "idle"
+  );
+  const [draftSavedAt, setDraftSavedAt] = useState<string | null>(
+    initialDraft?.updatedAt ?? null
+  );
+  const [discardOpen, setDiscardOpen] = useState(false);
+  const lastSavedKeyRef = useRef(
+    initialDraft
+      ? draftKey(initialDraft.content, initialDraft.isInternal)
+      : EMPTY_DRAFT_KEY
+  );
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inFlightSaveRef = useRef<Promise<void> | null>(null);
+  // Set while a reply is being sent: autosave and the leave-flush stand down
+  // so they can't re-save text the comments route is about to delete.
+  const submittingRef = useRef(false);
+  // Set once the server answers 409 (ticket merged meanwhile): the draft
+  // route won't accept saves for this ticket any more, so stop retrying.
+  const draftBlockedRef = useRef(false);
+  // Latest values for the pagehide/unmount flush, which can't read state.
+  const latestRef = useRef({ content, isInternal });
+  latestRef.current = { content, isInternal };
+
+  const saveDraftRef = useRef<() => Promise<void>>(() => Promise.resolve());
+
+  // Saves are chained, never concurrent: two PUTs in flight can land out of
+  // order and leave an older version as the stored draft. Each save sends
+  // whatever the composer holds when it *starts*, so a queued save never
+  // writes stale text.
+  const saveDraft = useCallback(() => {
+    async function run() {
+      const { content: c, isInternal: i } = latestRef.current;
+      const key = draftKey(c, i);
+      if (
+        key === lastSavedKeyRef.current ||
+        submittingRef.current ||
+        draftBlockedRef.current
+      ) {
+        return;
+      }
+      setDraftStatus("saving");
+      try {
+        const res = await fetch(`/api/tickets/${ticketId}/draft`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ content: c, isInternal: i }),
+        });
+        if (res.status === 409) {
+          draftBlockedRef.current = true;
+          setDraftStatus("error");
+          const data = (await res.json().catch(() => null)) as {
+            error?: string;
+          } | null;
+          toast.error(data?.error ?? "This draft can no longer be saved.");
+          return;
+        }
+        if (!res.ok) {
+          throw new Error("save failed");
+        }
+        const data = (await res.json()) as {
+          draft: { updatedAt: string } | null;
+        };
+        lastSavedKeyRef.current = key;
+        setDraftSavedAt(data.draft?.updatedAt ?? null);
+        setDraftStatus(data.draft ? "saved" : "idle");
+      } catch {
+        setDraftStatus("error");
+        // Retry on its own — otherwise nothing re-saves until the next
+        // keystroke. A newer keystroke's timer takes precedence.
+        if (!saveTimerRef.current) {
+          saveTimerRef.current = setTimeout(() => {
+            saveTimerRef.current = null;
+            saveDraftRef.current();
+          }, DRAFT_RETRY_DELAY_MS);
+        }
+      }
+    }
+    const promise = (inFlightSaveRef.current ?? Promise.resolve()).then(run);
+    inFlightSaveRef.current = promise;
+    promise.finally(() => {
+      if (inFlightSaveRef.current === promise) {
+        inFlightSaveRef.current = null;
+      }
+    });
+    return promise;
+  }, [ticketId]);
+  saveDraftRef.current = saveDraft;
+
+  /** Cancels a scheduled autosave and waits out one already on the wire, so
+   * a late PUT can't land after a send/discard and resurrect the draft. */
+  async function settleDraftSaves() {
+    if (saveTimerRef.current) {
+      clearTimeout(saveTimerRef.current);
+      saveTimerRef.current = null;
+    }
+    await inFlightSaveRef.current;
+  }
+
+  useEffect(() => {
+    if (
+      draftKey(content, isInternal) === lastSavedKeyRef.current ||
+      submitting
+    ) {
+      return;
+    }
+    saveTimerRef.current = setTimeout(() => {
+      saveTimerRef.current = null;
+      saveDraft();
+    }, DRAFT_SAVE_DELAY_MS);
+    return () => {
+      if (saveTimerRef.current) {
+        clearTimeout(saveTimerRef.current);
+        saveTimerRef.current = null;
+      }
+    };
+  }, [content, isInternal, saveDraft, submitting]);
+
+  // Flush an unsaved change immediately when the agent leaves — closing the
+  // tab (pagehide) or navigating to another page/ticket (unmount). keepalive
+  // lets the request outlive the page.
+  useEffect(() => {
+    // `afterInFlight`: on in-app navigation the page stays alive, so queue
+    // behind a save already on the wire — two concurrent PUTs can land out of
+    // order and leave the older text stored. pagehide can't wait (the page is
+    // being torn down), so it sends immediately.
+    function flush(afterInFlight: boolean) {
+      if (submittingRef.current || draftBlockedRef.current) {
+        return;
+      }
+      const { content: c, isInternal: i } = latestRef.current;
+      const key = draftKey(c, i);
+      if (key === lastSavedKeyRef.current) {
+        return;
+      }
+      lastSavedKeyRef.current = key;
+      const body = JSON.stringify({ content: c, isInternal: i });
+      const send = () =>
+        fetch(`/api/tickets/${ticketId}/draft`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body,
+          // Over the limit a keepalive request is rejected outright; a plain
+          // one still completes for in-app navigation (the page stays alive).
+          keepalive:
+            new TextEncoder().encode(body).length < KEEPALIVE_BODY_LIMIT,
+        }).catch(() => {
+          // Best effort — the page is going away; nothing left to report to.
+        });
+      const inFlight = inFlightSaveRef.current;
+      if (afterInFlight && inFlight) {
+        inFlight.then(send, send);
+      } else {
+        send();
+      }
+    }
+    const onPageHide = () => flush(false);
+    window.addEventListener("pagehide", onPageHide);
+    return () => {
+      window.removeEventListener("pagehide", onPageHide);
+      flush(true);
+    };
+  }, [ticketId]);
+
+  async function handleDiscardDraft() {
+    setDiscardOpen(false);
+    await settleDraftSaves();
+    try {
+      const res = await fetch(`/api/tickets/${ticketId}/draft`, {
+        method: "DELETE",
+      });
+      if (res.status === 409) {
+        // Ticket merged meanwhile — the merge already deleted this draft.
+        draftBlockedRef.current = true;
+      } else if (!res.ok) {
+        throw new Error("discard failed");
+      }
+    } catch {
+      toast.error("Couldn't discard the draft. Please try again.");
+      return;
+    }
+    lastSavedKeyRef.current = EMPTY_DRAFT_KEY;
+    setContent("");
+    setIsInternal(false);
+    setDraftSavedAt(null);
+    setDraftStatus("idle");
+    toast.success("Draft discarded.");
+  }
 
   // Object URLs for image thumbnails in the compose box — created when the
   // file list changes and revoked on cleanup so they never leak.
@@ -119,7 +350,9 @@ export function AgentReplyForm({
       return;
     }
     setError(null);
+    submittingRef.current = true;
     setSubmitting(true);
+    await settleDraftSaves();
     try {
       const body = new FormData();
       body.append("content", content);
@@ -140,6 +373,10 @@ export function AgentReplyForm({
         return;
       }
       const wasInternal = isInternal;
+      // The comments route already deleted the server-side draft.
+      lastSavedKeyRef.current = EMPTY_DRAFT_KEY;
+      setDraftSavedAt(null);
+      setDraftStatus("idle");
       setContent("");
       setFiles([]);
       // Reset to a public reply after every send — otherwise a toggle left on
@@ -157,6 +394,7 @@ export function AgentReplyForm({
       setError("Network error. Please try again.");
       toast.error("Network error. Please try again.");
     } finally {
+      submittingRef.current = false;
       setSubmitting(false);
     }
   }
@@ -265,11 +503,14 @@ export function AgentReplyForm({
             {/* Internal-note toggle */}
             <button
               className={cn(
-                "flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium transition-colors",
+                "flex items-center gap-1.5 rounded-md px-2 py-1.5 text-xs font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50",
                 isInternal
                   ? "bg-amber-100 text-amber-800 dark:bg-amber-900/70 dark:text-amber-100"
                   : "text-base-content hover:bg-base-300"
               )}
+              // Disabled while sending: flipping it mid-send would schedule an
+              // autosave that re-creates the draft the send just deleted.
+              disabled={submitting}
               onClick={() => setIsInternal((v) => !v)}
               onMouseDown={(e) => e.preventDefault()}
               title="Toggle internal note — only visible to agents"
@@ -278,6 +519,40 @@ export function AgentReplyForm({
               <LockSimpleIcon className="size-3.5" />
               Internal note
             </button>
+
+            {/* Draft state + discard */}
+            {(draftStatus !== "idle" || !isRichTextEmpty(content)) && (
+              <div className="ml-1 flex min-w-0 items-center gap-0.5">
+                <span
+                  aria-live="polite"
+                  className={cn(
+                    "truncate text-xs",
+                    draftStatus === "error"
+                      ? "text-red-600"
+                      : "text-base-content-muted"
+                  )}
+                >
+                  {draftStatus === "saving" && "Saving draft…"}
+                  {draftStatus === "error" && "Couldn't save draft"}
+                  {draftStatus === "saved" && (
+                    <>
+                      Draft saved · <LocalDateTime date={draftSavedAt} />
+                    </>
+                  )}
+                </span>
+                <button
+                  aria-label="Discard draft"
+                  className="flex size-7 shrink-0 items-center justify-center rounded-md text-base-content-muted transition-colors hover:bg-base-300 hover:text-red-600 disabled:opacity-40"
+                  disabled={submitting}
+                  onClick={() => setDiscardOpen(true)}
+                  onMouseDown={(e) => e.preventDefault()}
+                  title="Discard draft"
+                  type="button"
+                >
+                  <TrashIcon className="size-3.5" />
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Send */}
@@ -298,6 +573,38 @@ export function AgentReplyForm({
           </Button>
         </div>
       </div>
+
+      {/* Discard-draft confirmation */}
+      <Dialog onOpenChange={setDiscardOpen} open={discardOpen}>
+        <DialogContent className="rounded-xl max-w-sm">
+          <DialogHeader>
+            <div className="mx-auto mb-2 flex size-10 items-center justify-center rounded-full bg-red-100">
+              <TrashIcon className="size-5 text-red-600" />
+            </div>
+            <DialogTitle className="text-base-content text-center">
+              Discard this draft?
+            </DialogTitle>
+            <DialogDescription className="text-base-content-muted text-center">
+              Your unsent reply will be permanently deleted.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button
+              className="flex-1 border-base-300 text-base-content rounded-md"
+              onClick={() => setDiscardOpen(false)}
+              variant="outline"
+            >
+              Cancel
+            </Button>
+            <Button
+              className="flex-1 bg-red-600 hover:bg-red-700 text-white rounded-md"
+              onClick={handleDiscardDraft}
+            >
+              Discard
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </form>
   );
 }

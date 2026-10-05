@@ -138,6 +138,21 @@ Admins see a "Delete Ticket" button in the ticket detail sidebar that agents do 
 
 Admins can manage the statuses and categories used across all tickets. Changes take effect immediately for all new and existing ticket displays.
 
+### Ticket Actions
+
+The first card on the page switches the agent ticket actions on or off, each with its own
+notification switch (all on by default; stored on `platform_settings`, read via
+`getTicketActionSettings()` in `lib/settings.ts`):
+
+| Action | Feature switch (`…Enabled`) | When off | Notification switch (`…NotificationsEnabled`) |
+|---|---|---|---|
+| Merge | `ticketMergeEnabled` | "Merge Ticket" button hidden; `POST /api/tickets/{id}/merge` → 403 | `ticket_merged` notifications; plus **Email the customer** (`ticketMergeCustomerEmailEnabled`) for the "Ticket Merged" email |
+| Split | `ticketSplitEnabled` | Split icon hidden on customer replies; `POST /api/tickets/{id}/split` → 403 | The owner's `ticket_split` notification (with it off, the owner gets the plain `ticket_created` one instead — the new ticket's `ticket_created` notification and push always go out, like any new ticket) |
+| Link | `ticketLinkEnabled` | Add/remove controls hidden — existing links stay visible read-only (sidebar card hidden if there are none); link add/remove APIs → 403 | `ticket_linked` notifications |
+
+A notification switch is greyed out while its feature is off. Changes apply on the next
+page load / request — no restart. Saved through `PATCH /api/admin/settings`.
+
 ### 3a. Statuses
 
 Displays all ticket statuses in `sortOrder` order.

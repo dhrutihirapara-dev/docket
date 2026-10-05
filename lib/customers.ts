@@ -1,4 +1,4 @@
-import { and, count, desc, eq, gte, sql } from "drizzle-orm";
+import { and, count, desc, eq, gte, isNull, sql } from "drizzle-orm";
 import { customers } from "@/db/schema/customers";
 import { ticketStatuses } from "@/db/schema/ticket-config";
 import { tickets } from "@/db/schema/tickets";
@@ -76,7 +76,8 @@ async function getCustomerFrequency(
     .where(
       and(
         eq(tickets.customerId, customerId),
-        gte(tickets.createdAt, rangeStart)
+        gte(tickets.createdAt, rangeStart),
+        isNull(tickets.mergedIntoTicketId)
       )
     )
     .groupBy(monthExpr);
@@ -119,7 +120,12 @@ export async function getCustomerProfile(
       })
       .from(tickets)
       .leftJoin(ticketStatuses, eq(tickets.status, ticketStatuses.slug))
-      .where(eq(tickets.customerId, customerId))
+      .where(
+        and(
+          eq(tickets.customerId, customerId),
+          isNull(tickets.mergedIntoTicketId)
+        )
+      )
       .orderBy(desc(tickets.createdAt)),
     getCustomerFrequency(customerId),
   ]);

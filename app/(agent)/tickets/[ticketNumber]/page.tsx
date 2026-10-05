@@ -2,12 +2,14 @@ import {
   ArrowLeftIcon,
   CaretLeftIcon,
   CaretRightIcon,
+  GitMergeIcon,
+  LinkSimpleIcon,
   LockSimpleIcon,
 } from "@phosphor-icons/react/dist/ssr";
 import { and, asc, desc, eq, gt, lt, or } from "drizzle-orm";
 import { alias } from "drizzle-orm/pg-core";
 import Link from "next/link";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { TicketDetailRealtime } from "@/components/agent/ticket-detail-realtime";
 import { DeletableTicketAttachments } from "@/components/common/deletable-ticket-attachments";
 import { LocalDateTime } from "@/components/common/local-datetime";
@@ -27,12 +29,13 @@ import { getCannedResponses } from "@/lib/canned-responses";
 import { getCustomFieldValues } from "@/lib/custom-fields";
 import { db } from "@/lib/db";
 import { isRichTextEmpty } from "@/lib/rich-text";
+// import { getSlaPolicies, resolveSlaPolicy } from "@/lib/sla-policies";
+import { getPlatformSettings, getTicketActionSettings } from "@/lib/settings";
 import {
   computeSlaSnapshot,
   computeWaitingTimeSeconds,
   waitingTimeSecondsSql,
 } from "@/lib/sla";
-// import { getSlaPolicies, resolveSlaPolicy } from "@/lib/sla-policies";
 import { storage } from "@/lib/storage";
 import { getTicketTags } from "@/lib/tags";
 import {
@@ -42,6 +45,9 @@ import {
 } from "@/lib/ticket-config";
 import { COLOR_BADGE } from "@/lib/tickets";
 import { canDeleteAttachment } from "@/lib/tickets/attachment-permissions";
+import { ticketLinkLabel } from "@/lib/tickets/link-types";
+import { getTicketLinks } from "@/lib/tickets/links";
+import { getReplyDraft } from "@/lib/tickets/reply-drafts";
 import {
   buildTicketsWhereClause,
   parseTicketListSort,
@@ -56,11 +62,14 @@ import {
 import { getInitials } from "@/lib/utils";
 import { AgentReplyForm } from "./_components/agent-reply-form";
 import { CustomerProfilePopover } from "./_components/customer-profile-popover";
+import { SplitCommentButton } from "./_components/split-comment-button";
 import { TicketInfoSidebar } from "./_components/ticket-info-sidebar";
 
 interface Props {
   params: Promise<{ ticketNumber: string }>;
-  searchParams: Promise<TicketListSearchParams>;
+  // `mergedFrom` is set only by the merged-ticket redirect below; it is kept
+  // out of the list params so prev/next links don't carry it along.
+  searchParams: Promise<TicketListSearchParams & { mergedFrom?: string }>;
 }
 
 // Self-join onto `user` for the assignee — `user` is already used unaliased
@@ -181,7 +190,8 @@ export default async function AgentTicketDetailPage({
   searchParams,
 }: Props) {
   const { ticketNumber: ticketNumberParam } = await params;
-  const listParams = await searchParams;
+  const { mergedFrom, ...listParams } = await searchParams;
+  const mergedFromNumber = Number.parseInt(mergedFrom ?? "", 10);
   const session = await requireAgent();
 
   // The URL segment is the ticket number (e.g. /tickets/929), not the
@@ -216,6 +226,7 @@ export default async function AgentTicketDetailPage({
       waitingSince: tickets.waitingSince,
       firstRespondedAt: tickets.firstRespondedAt,
       slaActiveSeconds: tickets.slaActiveSeconds,
+      mergedIntoTicketId: tickets.mergedIntoTicketId,
     })
     .from(tickets)
     .innerJoin(customers, eq(tickets.customerId, customers.id))
@@ -225,6 +236,21 @@ export default async function AgentTicketDetailPage({
 
   if (!ticket) {
     notFound();
+  }
+
+  // A merged ticket is an empty, closed shell — its thread lives on the
+  // ticket it was merged into, so open that one instead.
+  if (ticket.mergedIntoTicketId) {
+    const [target] = await db
+      .select({ ticketNumber: tickets.ticketNumber })
+      .from(tickets)
+      .where(eq(tickets.id, ticket.mergedIntoTicketId))
+      .limit(1);
+    if (target) {
+      redirect(
+        `/tickets/${target.ticketNumber}?mergedFrom=${ticket.ticketNumber}`
+      );
+    }
   }
 
   // Reconstructs the same filtered/sorted result set the agent came from
@@ -266,6 +292,10 @@ export default async function AgentTicketDetailPage({
     prevTicketNumber,
     nextTicketNumber,
     sendReplyOnEnter,
+    replyDraft,
+    links,
+    ticketActions,
+    platformSettings,
     // showSlaAndOverdue,
   ] = await Promise.all([
     getTicketCategories(),
@@ -289,6 +319,10 @@ export default async function AgentTicketDetailPage({
       adjacentSeekTicket
     ),
     getSendReplyOnEnterPref(session.id),
+    getReplyDraft(ticket.id, session.id),
+    getTicketLinks(ticket.id),
+    getTicketActionSettings(),
+    getPlatformSettings(),
     // getShowSlaAndOverduePref(session.id),
   ]);
 
@@ -384,6 +418,22 @@ export default async function AgentTicketDetailPage({
         </div>
       </div>
 
+      {/* Explains the redirect from a merged ticket's number, which would
+          otherwise look like landing on the wrong ticket. Outside the thread's
+          scroll area on purpose: the thread auto-scrolls to the bottom on load,
+          which would push a notice inside it up under the sticky breadcrumb. */}
+      {Number.isInteger(mergedFromNumber) && mergedFromNumber > 0 && (
+        <div
+          // Below lg the whole page scrolls (and jumps to the newest message on
+          // load), so the notice sticks under the breadcrumb to stay visible.
+          className="flex shrink-0 items-center gap-2 border-b border-base-300 bg-base-100 px-4 py-2.5 text-sm text-base-content max-lg:sticky max-lg:top-12 max-lg:z-10 lg:px-8"
+          role="status"
+        >
+          <GitMergeIcon className="size-4 shrink-0 text-base-content-muted" />
+          Ticket #{mergedFromNumber} was merged into this ticket.
+        </div>
+      )}
+
       {/* Two-column row — no gap and no padding on the row itself:
           the divider is the sidebar's own border-l sitting flush
           against the main column, and all padding lives INSIDE each scroll
@@ -417,6 +467,41 @@ export default async function AgentTicketDetailPage({
                   <h1 className="text-lg font-semibold text-base-content wrap-break-word">
                     {ticket.subject}
                   </h1>
+                  {/* Linked tickets up front, not only in the (collapsed)
+                      sidebar section — so an agent opening this ticket sees
+                      that a teammate tied it to other work. */}
+                  {links.length > 0 && (
+                    <div className="mt-3 flex flex-wrap items-center gap-1.5">
+                      <span className="inline-flex items-center gap-1 text-xs text-base-content-muted">
+                        <LinkSimpleIcon className="size-3.5" />
+                        Linked:
+                      </span>
+                      {links.map((link) => (
+                        <Link
+                          className="inline-flex max-w-full items-center gap-1 rounded-field border border-base-300 bg-base-300/30 px-2 py-0.5 text-xs text-base-content transition-colors hover:bg-base-300"
+                          href={`/tickets/${link.ticket.ticketNumber}`}
+                          key={link.id}
+                          title={`${ticketLinkLabel(link.type, link.direction)} #${link.ticket.ticketNumber} — ${link.ticket.subject}${link.createdByName ? ` (linked by ${link.createdByName})` : ""}`}
+                        >
+                          <span className="shrink-0 text-base-content-muted">
+                            {ticketLinkLabel(link.type, link.direction)}
+                          </span>
+                          <span className="shrink-0 font-mono font-medium">
+                            #{link.ticket.ticketNumber}
+                          </span>
+                          <span className="truncate">
+                            {link.ticket.subject}
+                          </span>
+                          <span
+                            className={`ml-0.5 shrink-0 rounded border px-1 text-[10px] font-medium ${COLOR_BADGE[statusMap[link.ticket.status]?.color ?? "slate"] ?? ""}`}
+                          >
+                            {statusMap[link.ticket.status]?.label ??
+                              link.ticket.status}
+                          </span>
+                        </Link>
+                      ))}
+                    </div>
+                  )}
                 </div>
                 <span
                   className={`inline-flex items-center rounded border px-2.5 py-1 text-xs font-medium shrink-0 ${COLOR_BADGE[statusMap[ticket.status]?.color ?? "slate"] ?? ""}`}
@@ -534,6 +619,16 @@ export default async function AgentTicketDetailPage({
                       <span className="text-xs text-base-content-muted ml-auto shrink-0">
                         <LocalDateTime date={comment.createdAt} />
                       </span>
+                      {ticketActions.ticketSplitEnabled &&
+                        isCustomer &&
+                        !comment.isInternal && (
+                          <SplitCommentButton
+                            commentId={comment.id}
+                            ticketId={ticket.id}
+                            ticketNumber={ticket.ticketNumber}
+                            ticketSubject={ticket.subject}
+                          />
+                        )}
                     </div>
                     {!isRichTextEmpty(comment.content) && (
                       <RichTextContent content={comment.content} />
@@ -575,8 +670,18 @@ export default async function AgentTicketDetailPage({
               thread so it stays aligned. */}
           {isOpen && (
             <div className="shrink-0 px-4 pb-4 pt-2 lg:px-8 lg:pb-6">
+              {/* Keyed by ticket so Previous/Next remounts the composer —
+                  flushing this ticket's draft and loading the next one's. */}
               <AgentReplyForm
                 cannedResponses={cannedResponses}
+                initialDraft={
+                  replyDraft && {
+                    content: replyDraft.content,
+                    isInternal: replyDraft.isInternal,
+                    updatedAt: replyDraft.updatedAt.toISOString(),
+                  }
+                }
+                key={ticket.id}
                 sendReplyOnEnter={sendReplyOnEnter}
                 ticketId={ticket.id}
                 totalAttachments={attachments.length}
@@ -590,10 +695,17 @@ export default async function AgentTicketDetailPage({
           <TicketInfoSidebar
             activity={activity}
             agents={agents}
+            canLink={ticketActions.ticketLinkEnabled}
+            canMerge={ticketActions.ticketMergeEnabled}
             categories={categories}
             currentUserId={session.id}
             customFields={customFields}
             isAdmin={session.role === ADMIN_ROLE}
+            links={links}
+            mergeEmailsCustomer={
+              ticketActions.ticketMergeCustomerEmailEnabled &&
+              platformSettings.ticketEmailNotificationsEnabled
+            }
             priorities={priorities}
             showSlaAndOverdue={showSlaAndOverdue}
             slaSnapshot={slaSnapshot}

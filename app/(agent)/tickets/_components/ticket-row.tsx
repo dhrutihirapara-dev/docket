@@ -1,5 +1,6 @@
 "use client";
 
+import { LinkSimpleIcon, PencilSimpleLineIcon } from "@phosphor-icons/react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
@@ -33,7 +34,11 @@ interface Row {
   assignedAgentName: string | null;
   category: string;
   customerName: string;
+  /** The current agent has an unsent reply draft on this ticket. */
+  hasDraft: boolean;
   id: string;
+  /** Numbers of tickets linked to this one (either direction). */
+  linkedTicketNumbers: number[];
   priority: string;
   slaSnapshot: SlaSnapshot;
   status: string;
@@ -58,7 +63,6 @@ interface ColorRow {
 interface Props {
   agents: Agent[];
   categoryMap: Record<string, ColorRow | undefined>;
-  isAdmin: boolean;
   /** Current filter/sort/page query string — appended to this row's ticket
    * link so the detail page's Previous/Next buttons stay within this same
    * filtered result set. */
@@ -68,6 +72,8 @@ interface Props {
   priorities: TicketPriority[];
   priorityMap: Record<string, ColorRow | undefined>;
   row: Row;
+  /** Show the selection checkbox (see TicketsTable's `canSelect`). */
+  selectable: boolean;
   selected: boolean;
   /** The agent's "Show SLA & Overdue" preference — off shows only the
    * waiting time (SlaWaitBadge), not SLA/overdue badges. */
@@ -85,7 +91,7 @@ export function TicketRow({
   statuses,
   priorities,
   agents,
-  isAdmin,
+  selectable,
   selected,
   onRequestClose,
   onToggleSelect,
@@ -314,7 +320,7 @@ export function TicketRow({
         selected ? "bg-primary/5" : ""
       }`}
     >
-      {isAdmin && (
+      {selectable && (
         <td
           className={`sticky left-0 z-10 px-4 py-3 transition-colors group-hover:bg-base-300/40 ${
             selected ? "bg-primary/5" : "bg-base-100"
@@ -327,13 +333,36 @@ export function TicketRow({
         #{row.ticketNumber}
       </td>
       <td className="px-4 py-3">
-        <Link
-          className="text-[13px] font-medium text-base-content hover:underline line-clamp-2"
-          href={`/tickets/${row.ticketNumber}${listQuery}`}
-          title={row.subject}
-        >
-          {row.subject}
-        </Link>
+        <div className="flex items-start gap-2">
+          {row.hasDraft && (
+            <span
+              aria-label="Draft — you have an unsent reply on this ticket"
+              className="-my-0.5 flex size-6 shrink-0 items-center justify-center rounded-field text-primary"
+              role="img"
+              title="Draft — unsent reply saved"
+            >
+              <PencilSimpleLineIcon className="size-4" weight="bold" />
+            </span>
+          )}
+          <Link
+            className="text-[13px] font-medium text-base-content hover:underline line-clamp-2"
+            href={`/tickets/${row.ticketNumber}${listQuery}`}
+            title={row.subject}
+          >
+            {row.subject}
+          </Link>
+          {row.linkedTicketNumbers.length > 0 && (
+            <span
+              aria-label={`Linked to ${row.linkedTicketNumbers.map((n) => `#${n}`).join(", ")}`}
+              className="mt-0.5 inline-flex shrink-0 items-center gap-0.5 text-[11px] text-base-content-muted"
+              role="img"
+              title={`Linked to ${row.linkedTicketNumbers.map((n) => `#${n}`).join(", ")}`}
+            >
+              <LinkSimpleIcon className="size-3.5" weight="bold" />
+              {row.linkedTicketNumbers.length}
+            </span>
+          )}
+        </div>
       </td>
       {visibleColumns.map((c) => (
         <td className="px-4 py-3" key={c.id}>

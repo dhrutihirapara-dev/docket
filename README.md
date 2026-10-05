@@ -296,7 +296,9 @@ The full annotated list is in [`.env.example`](.env.example) and
 
 | Variable | What it is |
 |----------|------------|
-| `NEXT_PUBLIC_PUSHER_BEAMS_INSTANCE_ID`, `PUSHER_BEAMS_SECRET_KEY` | Notifications that reach your team even with the app closed |
+| `PUSH_PROVIDER` | Which service sends notifications that reach your team even with the app closed: `pusher` (default) or `webpush`. Easier to pick from Admin → Integrations → Push Notifications. |
+| `WEB_PUSH_VAPID_PUBLIC_KEY`, `WEB_PUSH_VAPID_PRIVATE_KEY` | Keys for `webpush`, the browser's built-in push. Needs no outside account; Integrations can generate the keys for you. |
+| `NEXT_PUBLIC_PUSHER_BEAMS_INSTANCE_ID`, `PUSHER_BEAMS_SECRET_KEY` | Credentials for `pusher`, which sends through Pusher Beams |
 | `PUSHER_APP_ID`, `NEXT_PUBLIC_PUSHER_KEY`, `PUSHER_SECRET`, `NEXT_PUBLIC_PUSHER_CLUSTER` | Lists and open requests that update without a refresh. A different Pusher product from the one above, so create a separate app for it. |
 
 Without any of these, your team still gets the in-app notification bell and the pages
@@ -354,15 +356,15 @@ docker compose up -d
 Pin a version in production, because `latest` moves with every release:
 
 ```bash
-IMAGE_TAG=0.5.0 docker compose up -d
+IMAGE_TAG=0.6.0 docker compose up -d
 ```
 
-Available tags are `latest`, the `0` / `0.5` / `0.5.0` ladder, `main` (rebuilt on
+Available tags are `latest`, the `0` / `0.6` / `0.6.0` ladder, `main` (rebuilt on
 every change, expect rough edges), and a fixed `sha-<short>` per build. Each carries builds
 for both Intel and ARM machines:
 
 ```bash
-docker pull ghcr.io/stack256org/docket:0.5.0
+docker pull ghcr.io/stack256org/docket:0.6.0
 ```
 <!-- END GENERATED: image-tags -->
 
