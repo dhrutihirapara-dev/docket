@@ -8,7 +8,7 @@ import {
   WarningCircleIcon,
 } from "@phosphor-icons/react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { SearchableSelect } from "@/components/common/searchable-select";
 import { Button } from "@/components/ui/button";
@@ -126,6 +126,33 @@ export function TicketsTable({
   // `runBulk`. A real navigation remounts this component (page.tsx keys the
   // Suspense boundary on `params`), re-seeding it from fresh data naturally.
   const [rows, setRows] = useState(initialRows);
+  // "Draft" markers, re-checked on mount: Back/Forward restores this page
+  // from Next's client router cache, so the server-rendered `hasDraft` can
+  // predate a draft the agent just typed on the ticket they came back from.
+  const [draftIds, setDraftIds] = useState(
+    () => new Set(initialRows.filter((r) => r.hasDraft).map((r) => r.id))
+  );
+  useEffect(() => {
+    const ids = initialRows.map((r) => r.id);
+    if (ids.length === 0) {
+      return;
+    }
+    const controller = new AbortController();
+    fetch(`/api/tickets/drafts?ids=${encodeURIComponent(ids.join(","))}`, {
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: { ticketIds?: string[] } | null) => {
+        if (data?.ticketIds) {
+          setDraftIds(new Set(data.ticketIds));
+        }
+      })
+      .catch(() => {
+        // Best effort — the server-rendered markers stay as they were.
+      });
+    return () => controller.abort();
+  }, [initialRows]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [busy, setBusy] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
@@ -477,7 +504,7 @@ export function TicketsTable({
                   onToggleSelect={() => toggleOne(row.id)}
                   priorities={priorities}
                   priorityMap={priorityMap}
-                  row={row}
+                  row={{ ...row, hasDraft: draftIds.has(row.id) }}
                   selected={selected.has(row.id)}
                   showSlaAndOverdue={showSlaAndOverdue}
                   statuses={statuses}
