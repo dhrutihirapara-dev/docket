@@ -118,7 +118,7 @@ Dark mode applies **only to the agent + admin portals** (the customer portal has
 `base-100`/`base-200`/`base-300` are **neutral across every preset** (default/ocean/forest/sunset/indigo/slate) — brand color lives in `primary`/`secondary`/sidebar, not in the base surface/border tiers, matching how every stock daisyUI theme works. So switching presets recolors buttons, links, the sidebar, and focus rings, but borders and hover-fill backgrounds stay a fixed neutral gray-blue regardless of preset.
 
 - The **customer portal** (`app/(customer)/`) still uses the brand utilities directly — it's light-only, so that's fine.
-- **Dark palette** lives in the `.dark` block of `app/globals.css` (`--base-100` elevated < `--base-200` page/body < `--sidebar` darkest; brand accent kept in `--primary`, not grayscaled). Per-preset primary/sidebar overrides live in `DARK_THEME_VARS` in `theme-provider.tsx`.
+- **Dark palette** lives in the `.dark` block of `app/globals.css` (`--base-100` elevated < `--base-200` page/body < `--sidebar` darkest; brand accent kept in `--primary`, not grayscaled). Per-preset primary/sidebar overrides live in `DARK_THEME_VARS` in `lib/theme-vars.ts`.
 - `components/ui/*` primitives style from these tokens internally — most call sites never touch token classes directly, only the `variant`/`size` props.
 
 ### Theme System
@@ -130,7 +130,7 @@ Admins can change the platform color theme and appearance mode (light/dark/auto)
 - **`app/api/admin/settings/route.ts`** — `GET` (any agent/admin) + `PATCH` (admin only) for theme + appearanceMode.
 - **6 presets:** `default`, `ocean`, `forest`, `sunset`, `indigo`, `slate` — each defines both light and dark variant CSS vars.
 - **localStorage keys:** `docket_theme`, `docket_appearance` — cached for instant re-hydration without a DB round-trip.
-- **Pattern for new themes:** add a new preset object to `LIGHT_THEME_VARS` and `DARK_THEME_VARS` in `theme-provider.tsx`, then add it to the swatch list in `appearance-settings-form.tsx`.
+- **Pattern for new themes:** add a new preset object to `LIGHT_THEME_VARS` and `DARK_THEME_VARS` in `lib/theme-vars.ts` (shared by `theme-provider.tsx` and the pre-paint `theme-script.tsx`), then add it to the swatch list in `appearance-settings-form.tsx`.
 
 ### UI Components
 

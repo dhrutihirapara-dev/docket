@@ -43,11 +43,9 @@ export default async function RootLayout({
   children,
 }: Readonly<{ children: ReactNode }>) {
   // Only the agent/admin portals have dark mode (the customer portal is
-  // always light — see CLAUDE.md), but next/script's beforeInteractive
-  // strategy is only hoisted into the initial HTML correctly from the root
-  // layout — placed in a nested layout it renders as a literal <script>
-  // and Next/React warn on every render. Fetching settings here (unused by
-  // the customer portal) is the tradeoff for that placement requirement.
+  // always light — see CLAUDE.md), but the pre-paint theme script must live
+  // in the root <head> to run before the body paints. Fetching settings here
+  // (unused by the customer portal) is the tradeoff for that placement.
   const settings = await getPlatformSettings();
 
   return (
@@ -56,8 +54,13 @@ export default async function RootLayout({
       lang="en"
       suppressHydrationWarning
     >
+      <head>
+        <ThemeScript
+          appearanceMode={settings.appearanceMode}
+          theme={settings.theme}
+        />
+      </head>
       <body suppressHydrationWarning>
-        <ThemeScript appearanceMode={settings.appearanceMode} />
         {children}
         <Toaster />
       </body>
